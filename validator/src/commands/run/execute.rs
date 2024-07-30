@@ -535,6 +535,15 @@ pub fn execute(
         num_clean_threads: Some(accounts_db_clean_threads),
         num_foreground_threads: Some(accounts_db_foreground_threads),
         num_hash_threads: Some(accounts_db_hash_threads),
+        num_threads_scan_and_hash: if matches.is_present("accounts_db_pool_scan_and_hash") {
+            Some(value_t_or_exit!(
+                matches,
+                "accounts_db_pool_scan_and_hash",
+                usize
+            ))
+        } else {
+            None
+        },
         ..AccountsDbConfig::default()
     };
 

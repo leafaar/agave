@@ -372,6 +372,7 @@ pub const ACCOUNTS_DB_CONFIG_FOR_TESTING: AccountsDbConfig = AccountsDbConfig {
     num_foreground_threads: None,
     num_hash_threads: None,
     hash_calculation_pubkey_bins: Some(4),
+    num_threads_scan_and_hash: None,
 };
 pub const ACCOUNTS_DB_CONFIG_FOR_BENCHMARKS: AccountsDbConfig = AccountsDbConfig {
     index: Some(ACCOUNTS_INDEX_CONFIG_FOR_BENCHMARKS),
@@ -399,6 +400,7 @@ pub const ACCOUNTS_DB_CONFIG_FOR_BENCHMARKS: AccountsDbConfig = AccountsDbConfig
     num_foreground_threads: None,
     num_hash_threads: None,
     hash_calculation_pubkey_bins: None,
+    num_threads_scan_and_hash: None,
 };
 
 pub type BinnedHashData = Vec<Vec<CalculateHashIntermediate>>;
@@ -532,6 +534,7 @@ pub struct AccountsDbConfig {
     pub num_foreground_threads: Option<NonZeroUsize>,
     /// Number of threads for background accounts hashing (`thread_pool_hash`)
     pub num_hash_threads: Option<NonZeroUsize>,
+    pub num_threads_scan_and_hash: Option<usize>,
 }
 
 #[cfg(not(test))]
@@ -1428,6 +1431,8 @@ pub struct AccountsDb {
     /// Thread pool for AccountsBackgroundServices
     pub thread_pool_clean: ThreadPool,
     /// Thread pool for AccountsHashVerifier
+    pub thread_pool_scan_and_hash: ThreadPool,
+
     pub thread_pool_hash: ThreadPool,
 
     accounts_delta_hashes: Mutex<HashMap<Slot, AccountsDeltaHash>>,
@@ -1889,6 +1894,12 @@ impl AccountsDb {
             .stack_size(ACCOUNTS_STACK_SIZE)
             .build()
             .expect("new rayon threadpool");
+        let num_threads_scan_and_hash = accounts_db_config.num_threads_scan_and_hash;
+        let thread_pool_scan_and_hash = rayon::ThreadPoolBuilder::new()
+            .thread_name(|i| format!("solAccDbSh{i:02}"))
+            .num_threads(num_threads_scan_and_hash.unwrap_or_else(quarter_thread_count))
+            .build()
+            .unwrap();
 
         let num_clean_threads = accounts_db_config
             .num_clean_threads
@@ -1948,6 +1959,7 @@ impl AccountsDb {
                 .into(),
             thread_pool,
             thread_pool_clean,
+            thread_pool_scan_and_hash,
             thread_pool_hash,
             verify_accounts_hash_in_bg: VerifyAccountsHashInBackground::default(),
             active_stats: ActiveStats::default(),
@@ -6895,7 +6907,7 @@ impl AccountsDb {
         };
 
         let result = if use_bg_thread_pool {
-            self.thread_pool_hash.install(scan_and_hash)
+            self.thread_pool_scan_and_hash.install(scan_and_hash)
         } else {
             scan_and_hash()
         };

@@ -79,6 +79,11 @@ pub fn app<'a>(version: &'a str, default_args: &'a DefaultArgs) -> App<'a, 'a> {
         .subcommand(commands::set_log_filter::command())
         .subcommand(commands::staked_nodes_overrides::command())
         .subcommand(commands::wait_for_restart_window::command())
+        .arg(
+            Arg::with_name("accounts_db_pool_scan_and_hash")
+                .long("accounts-db-pool-scan-and-hash")
+                .takes_value(true)
+        )
         .subcommand(commands::set_public_address::command());
 
     commands::run::add_args(app, default_args)
