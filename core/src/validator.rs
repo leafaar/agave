@@ -548,7 +548,7 @@ pub struct Validator {
     snapshot_packager_service: Option<SnapshotPackagerService>,
     poh_recorder: Arc<RwLock<PohRecorder>>,
     poh_service: PohService,
-    tpu: Tpu,
+    tpu: Option<Tpu>,
     tvu: Tvu,
     ip_echo_server: Option<solana_net_utils::IpEchoServer>,
     pub cluster_info: Arc<ClusterInfo>,
@@ -1596,57 +1596,62 @@ impl Validator {
                 cancel_tpu_client_next,
             ))
         };
-        let tpu = Tpu::new_with_client(
-            &cluster_info,
-            &poh_recorder,
-            transaction_recorder,
-            entry_receiver,
-            retransmit_slots_receiver,
-            TpuSockets {
-                transactions: node.sockets.tpu,
-                transaction_forwards: node.sockets.tpu_forwards,
-                vote: node.sockets.tpu_vote,
-                broadcast: node.sockets.broadcast,
-                transactions_quic: node.sockets.tpu_quic,
-                transactions_forwards_quic: node.sockets.tpu_forwards_quic,
-                vote_quic: node.sockets.tpu_vote_quic,
-                vote_forwarding_client: node.sockets.tpu_vote_forwarding_client,
-            },
-            &rpc_subscriptions,
-            transaction_status_sender,
-            entry_notification_sender,
-            blockstore.clone(),
-            &config.broadcast_stage_type,
-            exit,
-            node.info.shred_version(),
-            vote_tracker,
-            bank_forks.clone(),
-            verified_vote_sender,
-            gossip_verified_vote_hash_sender,
-            replay_vote_receiver,
-            replay_vote_sender,
-            bank_notification_sender.map(|sender| sender.sender),
-            config.tpu_coalesce,
-            duplicate_confirmed_slot_sender,
-            forwarding_tpu_client,
-            turbine_quic_endpoint_sender,
-            &identity_keypair,
-            config.runtime_config.log_messages_bytes_limit,
-            &staked_nodes,
-            config.staked_nodes_overrides.clone(),
-            banking_tracer_channels,
-            tracer_thread,
-            tpu_enable_udp,
-            tpu_quic_server_config,
-            tpu_fwd_quic_server_config,
-            vote_quic_server_config,
-            &prioritization_fee_cache,
-            config.block_production_method.clone(),
-            config.transaction_struct.clone(),
-            config.enable_block_production_forwarding,
-            config.generator_config.clone(),
-            key_notifiers.clone(),
-        );
+        let tpu = if !config.voting_disabled {
+            Some(Tpu::new_with_client(
+                &cluster_info,
+                &poh_recorder,
+                transaction_recorder,
+                entry_receiver,
+                retransmit_slots_receiver,
+                TpuSockets {
+                    transactions: node.sockets.tpu,
+                    transaction_forwards: node.sockets.tpu_forwards,
+                    vote: node.sockets.tpu_vote,
+                    broadcast: node.sockets.broadcast,
+                    transactions_quic: node.sockets.tpu_quic,
+                    transactions_forwards_quic: node.sockets.tpu_forwards_quic,
+                    vote_quic: node.sockets.tpu_vote_quic,
+                    vote_forwarding_client: node.sockets.tpu_vote_forwarding_client,
+                },
+                &rpc_subscriptions,
+                transaction_status_sender,
+                entry_notification_sender,
+                blockstore.clone(),
+                &config.broadcast_stage_type,
+                exit,
+                node.info.shred_version(),
+                vote_tracker,
+                bank_forks.clone(),
+                verified_vote_sender,
+                gossip_verified_vote_hash_sender,
+                replay_vote_receiver,
+                replay_vote_sender,
+                bank_notification_sender.map(|sender| sender.sender),
+                config.tpu_coalesce,
+                duplicate_confirmed_slot_sender,
+                forwarding_tpu_client,
+                turbine_quic_endpoint_sender,
+                &identity_keypair,
+                config.runtime_config.log_messages_bytes_limit,
+                &staked_nodes,
+                config.staked_nodes_overrides.clone(),
+                banking_tracer_channels,
+                tracer_thread,
+                tpu_enable_udp,
+                tpu_quic_server_config,
+                tpu_fwd_quic_server_config,
+                vote_quic_server_config,
+                &prioritization_fee_cache,
+                config.block_production_method.clone(),
+                config.transaction_struct.clone(),
+                config.enable_block_production_forwarding,
+                config.generator_config.clone(),
+                key_notifiers.clone(),
+            ))
+        } else {
+            info!("TPU disabled for non-voting node");
+            None
+        };
 
         datapoint_info!(
             "validator-new",
@@ -1842,7 +1847,9 @@ impl Validator {
         if let Some(turbine_quic_endpoint) = &self.turbine_quic_endpoint {
             solana_turbine::quic_endpoint::close_quic_endpoint(turbine_quic_endpoint);
         }
-        self.tpu.join().expect("tpu");
+        if let Some(tpu) = self.tpu {
+            tpu.join().expect("tpu");
+        }
         self.tvu.join().expect("tvu");
         if let Some(turbine_quic_endpoint_join_handle) = self.turbine_quic_endpoint_join_handle {
             self.turbine_quic_endpoint_runtime
