@@ -129,6 +129,7 @@ struct RpcRequestMiddleware {
     snapshot_config: Option<SnapshotConfig>,
     bank_forks: Arc<RwLock<BankForks>>,
     health: Arc<RpcHealth>,
+    snapshot_serving_disabled: bool,
 }
 
 impl RpcRequestMiddleware {
@@ -137,6 +138,7 @@ impl RpcRequestMiddleware {
         snapshot_config: Option<SnapshotConfig>,
         bank_forks: Arc<RwLock<BankForks>>,
         health: Arc<RpcHealth>,
+        snapshot_serving_disabled: bool,
     ) -> Self {
         Self {
             ledger_path,
@@ -151,6 +153,7 @@ impl RpcRequestMiddleware {
             snapshot_config,
             bank_forks,
             health,
+            snapshot_serving_disabled,
         }
     }
 
@@ -260,6 +263,19 @@ impl RpcRequestMiddleware {
                     (self.ledger_path.join(stem), None)
                 }
                 _ => {
+                    // Return 404 if snapshot serving is disabled
+                    if self.snapshot_serving_disabled {
+                        return RequestMiddlewareAction::Respond {
+                            should_validate_hosts: true,
+                            response: Box::pin(async move {
+                                Ok(
+                                hyper::Response::builder()
+                                    .status(hyper::StatusCode::NOT_FOUND)
+                                    .body(hyper::Body::empty())
+                                    .expect("Failed to build 404 response"))
+                            }),
+                        };
+                    }
                     inc_new_counter_info!("rpc-get_snapshot", 1);
                     let (path, snapshot_type) = self.find_snapshot_file(stem);
                     (path, Some(snapshot_type))
@@ -343,6 +359,18 @@ impl RequestMiddleware for RpcRequestMiddleware {
             if request.uri().path() == FULL_SNAPSHOT_REQUEST_PATH
                 || request.uri().path() == INCREMENTAL_SNAPSHOT_REQUEST_PATH
             {
+                // Return 404 if snapshot serving is disabled
+                if self.snapshot_serving_disabled {
+                    return RequestMiddlewareAction::Respond {
+                        should_validate_hosts: true,
+                        response: Box::pin(async move {
+                            Ok(hyper::Response::builder()
+                                .status(hyper::StatusCode::NOT_FOUND)
+                                .body(hyper::Body::empty())
+                                .expect("Failed to build 404 response"))
+                        }),
+                    };
+                }
                 // Convenience redirect to the latest snapshot
                 let full_snapshot_archive_info =
                     snapshot_utils::get_highest_full_snapshot_archive_info(
@@ -486,6 +514,7 @@ pub struct JsonRpcServiceConfig<'a> {
     pub max_complete_transaction_status_slot: Arc<AtomicU64>,
     pub prioritization_fee_cache: Arc<PrioritizationFeeCache>,
     pub client_option: ClientOption<'a>,
+    pub snapshot_serving_disabled: bool,
 }
 
 /// [`ClientOption`] enum represents the available client types for TPU
@@ -549,6 +578,7 @@ impl JsonRpcService {
                     config.max_complete_transaction_status_slot,
                     config.prioritization_fee_cache,
                     runtime,
+                    config.snapshot_serving_disabled,
                 )?;
                 Ok(json_rpc_service)
             }
@@ -599,6 +629,7 @@ impl JsonRpcService {
                     config.max_complete_transaction_status_slot,
                     config.prioritization_fee_cache,
                     runtime,
+                    config.snapshot_serving_disabled,
                 )?;
                 Ok(json_rpc_service)
             }
@@ -628,6 +659,7 @@ impl JsonRpcService {
         connection_cache: Arc<ConnectionCache>,
         max_complete_transaction_status_slot: Arc<AtomicU64>,
         prioritization_fee_cache: Arc<PrioritizationFeeCache>,
+        snapshot_serving_disabled: bool,
     ) -> Result<Self, String> {
         let runtime = service_runtime(
             config.rpc_threads,
@@ -676,6 +708,7 @@ impl JsonRpcService {
             max_complete_transaction_status_slot,
             prioritization_fee_cache,
             runtime,
+            snapshot_serving_disabled,
         )?;
         Ok(json_rpc_service)
     }
@@ -710,6 +743,7 @@ impl JsonRpcService {
         max_complete_transaction_status_slot: Arc<AtomicU64>,
         prioritization_fee_cache: Arc<PrioritizationFeeCache>,
         runtime: Arc<TokioRuntime>,
+        snapshot_serving_disabled: bool,
     ) -> Result<Self, String> {
         info!("rpc bound to {:?}", rpc_addr);
         info!("rpc configuration: {:?}", config);
@@ -838,6 +872,7 @@ impl JsonRpcService {
                     snapshot_config,
                     bank_forks.clone(),
                     health.clone(),
+                    snapshot_serving_disabled,
                 );
                 let server = ServerBuilder::with_meta_extractor(
                     io,
@@ -1016,6 +1051,7 @@ mod tests {
             connection_cache,
             Arc::new(AtomicU64::default()),
             Arc::new(PrioritizationFeeCache::default()),
+            false, // snapshot_serving_disabled
         )
         .expect("assume successful JsonRpcService start");
         let thread = rpc_service.thread_hdl.thread();
@@ -1110,12 +1146,14 @@ mod tests {
             None,
             bank_forks.clone(),
             health.clone(),
+            false,
         );
         let rrm_with_snapshot_config = RpcRequestMiddleware::new(
             ledger_path.path().to_path_buf(),
             Some(SnapshotConfig::default()),
             bank_forks,
             health,
+            false,
         );
 
         assert!(rrm.is_file_get_path(DEFAULT_GENESIS_DOWNLOAD_PATH));
@@ -1218,6 +1256,7 @@ mod tests {
             None,
             bank_forks,
             RpcHealth::stub(optimistically_confirmed_bank, blockstore),
+            false,
         );
 
         // File does not exist => request should fail.
