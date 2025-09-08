@@ -172,6 +172,7 @@ pub struct ClusterInfo {
     contact_info_path: PathBuf,
     socket_addr_space: SocketAddrSpace,
     gossip_pull_response_disabled: bool,
+    snapshot_serving_disabled: bool,
 }
 
 impl ClusterInfo {
@@ -201,6 +202,7 @@ impl ClusterInfo {
             contact_save_interval: 0, // disabled
             socket_addr_space,
             gossip_pull_response_disabled: false,
+            snapshot_serving_disabled: false,
         };
         me.refresh_my_gossip_contact_info();
         me
@@ -212,6 +214,10 @@ impl ClusterInfo {
 
     pub fn set_gossip_pull_response_disabled(&mut self, disabled: bool) {
         self.gossip_pull_response_disabled = disabled;
+    }
+
+    pub fn set_snapshot_serving_disabled(&mut self, disabled: bool) {
+        self.snapshot_serving_disabled = disabled;
     }
 
     pub fn socket_addr_space(&self) -> &SocketAddrSpace {
@@ -738,6 +744,11 @@ impl ClusterInfo {
         full: (Slot, Hash),
         incremental: Vec<(Slot, Hash)>,
     ) -> Result<(), ClusterInfoError> {
+        // Don't advertise snapshot hashes if snapshot serving is disabled
+        if self.snapshot_serving_disabled {
+            return Ok(());
+        }
+        
         if incremental.len() > MAX_INCREMENTAL_SNAPSHOT_HASHES {
             return Err(ClusterInfoError::TooManyIncrementalSnapshotHashes);
         }
