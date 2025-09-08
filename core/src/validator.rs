@@ -228,6 +228,9 @@ pub struct ValidatorConfig {
     pub tpu_disabled: bool,
     pub retransmit_disabled: bool,
     pub duplicate_check_disabled: bool,
+    pub snapshot_serving_disabled: bool,
+    pub repair_serving_disabled: bool,
+    pub gossip_pull_response_disabled: bool,
     pub account_paths: Vec<PathBuf>,
     pub account_snapshot_paths: Vec<PathBuf>,
     pub rpc_config: JsonRpcConfig,
@@ -309,6 +312,9 @@ impl Default for ValidatorConfig {
             tpu_disabled: false,
             retransmit_disabled: false,
             duplicate_check_disabled: false,
+            snapshot_serving_disabled: false,
+            repair_serving_disabled: false,
+            gossip_pull_response_disabled: false,
             max_ledger_shreds: None,
             blockstore_options: BlockstoreOptions::default(),
             account_paths: Vec::new(),
@@ -549,7 +555,7 @@ pub struct Validator {
     sample_performance_service: Option<SamplePerformanceService>,
     stats_reporter_service: StatsReporterService,
     gossip_service: GossipService,
-    serve_repair_service: ServeRepairService,
+    serve_repair_service: Option<ServeRepairService>,
     completed_data_sets_service: Option<CompletedDataSetsService>,
     snapshot_packager_service: Option<SnapshotPackagerService>,
     poh_recorder: Arc<RwLock<PohRecorder>>,
@@ -1331,13 +1337,23 @@ impl Validator {
             Some(stats_reporter_sender.clone()),
             exit.clone(),
         );
-        let serve_repair = ServeRepair::new(
-            cluster_info.clone(),
-            bank_forks.clone(),
-            config.repair_whitelist.clone(),
-        );
-        let (repair_request_quic_sender, repair_request_quic_receiver) = unbounded();
+        // Repair response receiver is always needed for receiving repair responses from other nodes
         let (repair_response_quic_sender, repair_response_quic_receiver) = unbounded();
+        
+        // Only create repair serving components if not disabled
+        let (serve_repair, repair_request_quic_sender, repair_request_quic_receiver) = 
+            if !config.repair_serving_disabled {
+                let serve_repair = ServeRepair::new(
+                    cluster_info.clone(),
+                    bank_forks.clone(),
+                    config.repair_whitelist.clone(),
+                );
+                let (repair_request_quic_sender, repair_request_quic_receiver) = unbounded();
+                (Some(serve_repair), Some(repair_request_quic_sender), Some(repair_request_quic_receiver))
+            } else {
+                info!("Repair serving disabled");
+                (None, None, None)
+            };
         let (ancestor_hashes_response_quic_sender, ancestor_hashes_response_quic_receiver) =
             unbounded();
 
@@ -1425,7 +1441,7 @@ impl Validator {
                     .unwrap()
             });
         let (repair_quic_endpoints, repair_quic_async_senders, repair_quic_endpoints_join_handle) =
-            if genesis_config.cluster_type == ClusterType::MainnetBeta {
+            if genesis_config.cluster_type == ClusterType::MainnetBeta || config.repair_serving_disabled {
                 (None, RepairQuicAsyncSenders::new_dummy(), None)
             } else {
                 let repair_quic_sockets = RepairQuicSockets {
@@ -1434,7 +1450,9 @@ impl Validator {
                     ancestor_hashes_quic_socket: node.sockets.ancestor_hashes_requests_quic,
                 };
                 let repair_quic_senders = RepairQuicSenders {
-                    repair_request_quic_sender: repair_request_quic_sender.clone(),
+                    repair_request_quic_sender: repair_request_quic_sender
+                        .clone()
+                        .expect("repair_request_quic_sender should exist when creating QUIC endpoints"),
                     repair_response_quic_sender,
                     ancestor_hashes_response_quic_sender,
                 };
@@ -1453,19 +1471,21 @@ impl Validator {
                 })
                 .unwrap()
             };
-        let serve_repair_service = ServeRepairService::new(
-            serve_repair,
-            // Incoming UDP repair requests are adapted into RemoteRequest
-            // and also sent through the same channel.
-            repair_request_quic_sender,
-            repair_request_quic_receiver,
-            repair_quic_async_senders.repair_response_quic_sender,
-            blockstore.clone(),
-            node.sockets.serve_repair,
-            socket_addr_space,
-            stats_reporter_sender,
-            exit.clone(),
-        );
+        let serve_repair_service = serve_repair.map(|serve_repair| {
+            ServeRepairService::new(
+                serve_repair,
+                // Incoming UDP repair requests are adapted into RemoteRequest
+                // and also sent through the same channel.
+                repair_request_quic_sender.expect("repair_request_quic_sender should exist when repair serving is enabled"),
+                repair_request_quic_receiver.expect("repair_request_quic_receiver should exist when repair serving is enabled"),
+                repair_quic_async_senders.repair_response_quic_sender,
+                blockstore.clone(),
+                node.sockets.serve_repair,
+                socket_addr_space,
+                stats_reporter_sender,
+                exit.clone(),
+            )
+        });
 
         let in_wen_restart = config.wen_restart_proto_path.is_some() && !waited_for_supermajority;
         let wen_restart_repair_slots = if in_wen_restart {
@@ -1831,9 +1851,11 @@ impl Validator {
             .iter()
             .flatten()
             .for_each(repair::quic_endpoint::close_quic_endpoint);
-        self.serve_repair_service
-            .join()
-            .expect("serve_repair_service");
+        if let Some(serve_repair_service) = self.serve_repair_service {
+            serve_repair_service
+                .join()
+                .expect("serve_repair_service");
+        }
         if let Some(repair_quic_endpoints_join_handle) = self.repair_quic_endpoints_join_handle {
             self.repair_quic_endpoints_runtime
                 .map(|runtime| runtime.block_on(repair_quic_endpoints_join_handle))

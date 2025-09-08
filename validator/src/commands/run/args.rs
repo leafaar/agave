@@ -139,6 +139,24 @@ pub fn add_args<'a>(app: App<'a, 'a>, default_args: &'a DefaultArgs) -> App<'a, 
             .help("Disable duplicate shred check thread"),
     )
     .arg(
+        Arg::with_name("disable_snapshot_serving")
+            .long("disable-snapshot-serving")
+            .takes_value(false)
+            .help("Disable serving snapshots to other nodes"),
+    )
+    .arg(
+        Arg::with_name("disable_repair_serving")
+            .long("disable-repair-serving")
+            .takes_value(false)
+            .help("Disable serving repair shreds to other nodes"),
+    )
+    .arg(
+        Arg::with_name("disable_gossip_pull_response")
+            .long("disable-gossip-pull-response")
+            .takes_value(false)
+            .help("Disable serving gossip pull responses to other nodes"),
+    )
+    .arg(
         Arg::with_name("check_vote_account")
             .long("check-vote-account")
             .takes_value(true)
