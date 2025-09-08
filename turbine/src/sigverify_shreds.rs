@@ -65,7 +65,7 @@ pub fn spawn_shred_sigverify(
     bank_forks: Arc<RwLock<BankForks>>,
     leader_schedule_cache: Arc<LeaderScheduleCache>,
     shred_fetch_receiver: Receiver<PacketBatch>,
-    retransmit_sender: EvictingSender<Vec<shred::Payload>>,
+    retransmit_sender: Option<EvictingSender<Vec<shred::Payload>>>,
     verified_sender: Sender<Vec<(shred::Payload, /*is_repaired:*/ bool)>>,
     num_sigverify_threads: NonZeroUsize,
 ) -> JoinHandle<()> {
@@ -130,7 +130,7 @@ fn run_shred_sigverify<const K: usize>(
     recycler_cache: &RecyclerCache,
     deduper: &Deduper<K, [u8]>,
     shred_fetch_receiver: &Receiver<PacketBatch>,
-    retransmit_sender: &EvictingSender<Vec<shred::Payload>>,
+    retransmit_sender: &Option<EvictingSender<Vec<shred::Payload>>>,
     verified_sender: &Sender<Vec<(shred::Payload, /*is_repaired:*/ bool)>>,
     cluster_nodes_cache: &ClusterNodesCache<RetransmitStage>,
     cache: &RwLock<LruCache>,
@@ -265,12 +265,15 @@ fn run_shred_sigverify<const K: usize>(
         });
     // Repaired shreds are not retransmitted.
     stats.num_retransmit_shreds += shreds.len();
-    if let Err(send_err) = retransmit_sender.try_send(shreds.clone()) {
-        match send_err {
-            crossbeam_channel::TrySendError::Full(v) => {
-                stats.num_retransmit_stage_overflow_shreds += v.len();
+    // Only retransmit shreds if enabled
+    if let Some(retransmit_sender) = retransmit_sender {
+        if let Err(send_err) = retransmit_sender.try_send(shreds.clone()) {
+            match send_err {
+                crossbeam_channel::TrySendError::Full(v) => {
+                    stats.num_retransmit_stage_overflow_shreds += v.len();
+                }
+                _ => unreachable!("EvictingSender holds on to both ends of the channel"),
             }
-            _ => unreachable!("EvictingSender holds on to both ends of the channel"),
         }
     }
     // Send all shreds to window service to be inserted into blockstore.
