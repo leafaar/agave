@@ -225,6 +225,9 @@ pub struct ValidatorConfig {
     pub expected_bank_hash: Option<Hash>,
     pub expected_shred_version: Option<u16>,
     pub voting_disabled: bool,
+    pub tpu_disabled: bool,
+    pub retransmit_disabled: bool,
+    pub duplicate_check_disabled: bool,
     pub account_paths: Vec<PathBuf>,
     pub account_snapshot_paths: Vec<PathBuf>,
     pub rpc_config: JsonRpcConfig,
@@ -303,6 +306,9 @@ impl Default for ValidatorConfig {
             expected_bank_hash: None,
             expected_shred_version: None,
             voting_disabled: false,
+            tpu_disabled: false,
+            retransmit_disabled: false,
+            duplicate_check_disabled: false,
             max_ledger_shreds: None,
             blockstore_options: BlockstoreOptions::default(),
             account_paths: Vec::new(),
@@ -1536,6 +1542,8 @@ impl Validator {
                 replay_transactions_threads: config.replay_transactions_threads,
                 shred_sigverify_threads: config.tvu_shred_sigverify_threads,
                 retransmit_xdp: config.retransmit_xdp.clone(),
+                retransmit_disabled: config.retransmit_disabled,
+                duplicate_check_disabled: config.duplicate_check_disabled,
             },
             &max_slots,
             block_metadata_notifier,
@@ -1596,7 +1604,7 @@ impl Validator {
                 cancel_tpu_client_next,
             ))
         };
-        let tpu = if !config.voting_disabled {
+        let tpu = if !config.tpu_disabled {
             Some(Tpu::new_with_client(
                 &cluster_info,
                 &poh_recorder,
@@ -1649,7 +1657,7 @@ impl Validator {
                 key_notifiers.clone(),
             ))
         } else {
-            info!("TPU disabled for non-voting node");
+            info!("TPU disabled");
             None
         };
 

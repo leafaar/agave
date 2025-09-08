@@ -13,6 +13,7 @@ use {
     agave_feature_set as feature_set,
     assert_matches::debug_assert_matches,
     crossbeam_channel::{unbounded, Receiver, RecvTimeoutError, Sender},
+    lru::LruCache,
     rayon::{prelude::*, ThreadPool},
     solana_clock::{Slot, DEFAULT_MS_PER_SLOT},
     solana_gossip::cluster_info::ClusterInfo,
@@ -24,6 +25,7 @@ use {
     solana_measure::measure::Measure,
     solana_metrics::inc_new_counter_error,
     solana_rayon_threadlimit::get_thread_count,
+    solana_rpc::slot_status_notifier::SlotStatusNotifier,
     solana_runtime::bank_forks::BankForks,
     solana_streamer::evicting_sender::EvictingSender,
     solana_turbine::cluster_nodes,
@@ -188,9 +190,11 @@ fn run_insert<F>(
     metrics: &mut BlockstoreInsertionMetrics,
     ws_metrics: &mut WindowServiceMetrics,
     completed_data_sets_sender: Option<&CompletedDataSetsSender>,
-    retransmit_sender: &EvictingSender<Vec<shred::Payload>>,
+    retransmit_sender: Option<&EvictingSender<Vec<shred::Payload>>>,
     reed_solomon_cache: &ReedSolomonCache,
     accept_repairs_only: bool,
+    slot_status_notifier: Option<&SlotStatusNotifier>,
+    first_shred_cache: &mut LruCache<Slot, ()>,
 ) -> Result<()>
 where
     F: Fn(PossibleDuplicateShred),
@@ -213,7 +217,7 @@ where
             debug_assert_matches!(shred, shred::Payload::Shared(_));
         }
         let shred = Shred::new_from_serialized_shred(shred).ok()?;
-        Some((Cow::Owned(shred), repair))
+        Some((Cow::<'_, Shred>::Owned(shred), repair))
     };
     let now = Instant::now();
     let shreds: Vec<_> = thread_pool.install(|| {
@@ -225,6 +229,23 @@ where
     });
     ws_metrics.handle_packets_elapsed_us += now.elapsed().as_micros() as u64;
     ws_metrics.num_shreds_received += shreds.len();
+    
+    // Notify about first shred received for new slots when retransmit is disabled
+    // We only receive slot_status_notifier when retransmit is disabled (see tvu.rs)
+    if let Some(notifier) = slot_status_notifier {
+        for (shred, _) in &shreds {
+            let slot = shred.slot();
+            // Check if this is the first shred for this slot
+            if !first_shred_cache.contains(&slot) {
+                first_shred_cache.put(slot, ());
+                notifier
+                    .read()
+                    .expect("Failed to read slot_status_notifier")
+                    .notify_first_shred_received(slot);
+            }
+        }
+    }
+    
     let completed_data_sets = blockstore.insert_shreds_handle_duplicate(
         shreds,
         Some(leader_schedule_cache),
@@ -244,7 +265,7 @@ where
 
 pub struct WindowServiceChannels {
     pub verified_receiver: Receiver<Vec<(shred::Payload, /*is_repaired:*/ bool)>>,
-    pub retransmit_sender: EvictingSender<Vec<shred::Payload>>,
+    pub retransmit_sender: Option<EvictingSender<Vec<shred::Payload>>>,
     pub completed_data_sets_sender: Option<CompletedDataSetsSender>,
     pub duplicate_slots_sender: DuplicateSlotSender,
     pub repair_service_channels: RepairServiceChannels,
@@ -253,7 +274,7 @@ pub struct WindowServiceChannels {
 impl WindowServiceChannels {
     pub fn new(
         verified_receiver: Receiver<Vec<(shred::Payload, /*is_repaired:*/ bool)>>,
-        retransmit_sender: EvictingSender<Vec<shred::Payload>>,
+        retransmit_sender: Option<EvictingSender<Vec<shred::Payload>>>,
         completed_data_sets_sender: Option<CompletedDataSetsSender>,
         duplicate_slots_sender: DuplicateSlotSender,
         repair_service_channels: RepairServiceChannels,
@@ -270,7 +291,7 @@ impl WindowServiceChannels {
 
 pub(crate) struct WindowService {
     t_insert: JoinHandle<()>,
-    t_check_duplicate: JoinHandle<()>,
+    t_check_duplicate: Option<JoinHandle<()>>,
     repair_service: RepairService,
 }
 
@@ -284,6 +305,8 @@ impl WindowService {
         window_service_channels: WindowServiceChannels,
         leader_schedule_cache: Arc<LeaderScheduleCache>,
         outstanding_repair_requests: Arc<RwLock<OutstandingShredRepairs>>,
+        duplicate_check_disabled: bool,
+        slot_status_notifier: Option<SlotStatusNotifier>,
     ) -> WindowService {
         let cluster_info = repair_info.cluster_info.clone();
         let bank_forks = repair_info.bank_forks.clone();
@@ -310,16 +333,20 @@ impl WindowService {
             repair_service_channels,
         );
 
-        let (duplicate_sender, duplicate_receiver) = unbounded();
-
-        let t_check_duplicate = Self::start_check_duplicate_thread(
-            cluster_info,
-            exit.clone(),
-            blockstore.clone(),
-            duplicate_receiver,
-            duplicate_slots_sender,
-            bank_forks,
-        );
+        let (duplicate_sender, t_check_duplicate) = if !duplicate_check_disabled {
+            let (duplicate_sender, duplicate_receiver) = unbounded();
+            let t_check_duplicate = Some(Self::start_check_duplicate_thread(
+                cluster_info,
+                exit.clone(),
+                blockstore.clone(),
+                duplicate_receiver,
+                duplicate_slots_sender,
+                bank_forks,
+            ));
+            (Some(duplicate_sender), t_check_duplicate)
+        } else {
+            (None, None)
+        };
 
         let t_insert = Self::start_window_insert_thread(
             exit,
@@ -330,6 +357,7 @@ impl WindowService {
             completed_data_sets_sender,
             retransmit_sender,
             accept_repairs_only,
+            slot_status_notifier,
         );
 
         WindowService {
@@ -375,10 +403,11 @@ impl WindowService {
         blockstore: Arc<Blockstore>,
         leader_schedule_cache: Arc<LeaderScheduleCache>,
         verified_receiver: Receiver<Vec<(shred::Payload, /*is_repaired:*/ bool)>>,
-        check_duplicate_sender: Sender<PossibleDuplicateShred>,
+        check_duplicate_sender: Option<Sender<PossibleDuplicateShred>>,
         completed_data_sets_sender: Option<CompletedDataSetsSender>,
-        retransmit_sender: EvictingSender<Vec<shred::Payload>>,
+        retransmit_sender: Option<EvictingSender<Vec<shred::Payload>>>,
         accept_repairs_only: bool,
+        slot_status_notifier: Option<SlotStatusNotifier>,
     ) -> JoinHandle<()> {
         let handle_error = || {
             inc_new_counter_error!("solana-window-insert-error", 1, 1);
@@ -397,11 +426,15 @@ impl WindowService {
                     .build()
                     .unwrap();
                 let handle_duplicate = |possible_duplicate_shred| {
-                    let _ = check_duplicate_sender.send(possible_duplicate_shred);
+                    if let Some(ref sender) = check_duplicate_sender {
+                        let _ = sender.send(possible_duplicate_shred);
+                    }
                 };
                 let mut metrics = BlockstoreInsertionMetrics::default();
                 let mut ws_metrics = WindowServiceMetrics::default();
                 let mut last_print = Instant::now();
+                // LruCache for tracking first shred per slot (capacity 750 slots like RetransmitStage)
+                let mut first_shred_cache = LruCache::<Slot, ()>::new(750);
                 while !exit.load(Ordering::Relaxed) {
                     if let Err(e) = run_insert(
                         &thread_pool,
@@ -412,9 +445,11 @@ impl WindowService {
                         &mut metrics,
                         &mut ws_metrics,
                         completed_data_sets_sender.as_ref(),
-                        &retransmit_sender,
+                        retransmit_sender.as_ref(),
                         &reed_solomon_cache,
                         accept_repairs_only,
+                        slot_status_notifier.as_ref(),
+                        &mut first_shred_cache,
                     ) {
                         ws_metrics.record_error(&e);
                         if Self::should_exit_on_error(e, &handle_error) {
@@ -452,7 +487,9 @@ impl WindowService {
 
     pub(crate) fn join(self) -> thread::Result<()> {
         self.t_insert.join()?;
-        self.t_check_duplicate.join()?;
+        if let Some(t_check_duplicate) = self.t_check_duplicate {
+            t_check_duplicate.join()?;
+        }
         self.repair_service.join()
     }
 }
@@ -598,7 +635,6 @@ mod test {
             let _ = duplicate_shred_sender.send(shred);
         };
         let num_trials = 100;
-        let (dummy_retransmit_sender, _) = EvictingSender::new_bounded(0);
         for slot in 0..num_trials {
             let (shreds, _) = make_many_slot_entries(slot, 1, 10);
             let duplicate_index = 0;
@@ -617,7 +653,7 @@ mod test {
                     shreds,
                     None,
                     false, // is_trusted
-                    &dummy_retransmit_sender,
+                    None,  // No retransmit in test
                     &handle_duplicate,
                     &ReedSolomonCache::default(),
                     &mut BlockstoreInsertionMetrics::default(),

@@ -121,6 +121,24 @@ pub fn add_args<'a>(app: App<'a, 'a>, default_args: &'a DefaultArgs) -> App<'a, 
             .help("Launch validator without voting"),
     )
     .arg(
+        Arg::with_name("disable_tpu")
+            .long("disable-tpu")
+            .takes_value(false)
+            .help("Disable TPU"),
+    )
+    .arg(
+        Arg::with_name("disable_retransmit")
+            .long("disable-retransmit")
+            .takes_value(false)
+            .help("Disable retransmit stage"),
+    )
+    .arg(
+        Arg::with_name("disable_duplicate_check")
+            .long("disable-duplicate-check")
+            .takes_value(false)
+            .help("Disable duplicate shred check thread"),
+    )
+    .arg(
         Arg::with_name("check_vote_account")
             .long("check-vote-account")
             .takes_value(true)

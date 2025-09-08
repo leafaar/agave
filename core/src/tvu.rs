@@ -68,7 +68,7 @@ const CHANNEL_SIZE_RETRANSMIT_INGRESS: usize = 16 * 1024;
 pub struct Tvu {
     fetch_stage: ShredFetchStage,
     shred_sigverify: JoinHandle<()>,
-    retransmit_stage: RetransmitStage,
+    retransmit_stage: Option<RetransmitStage>,
     window_service: WindowService,
     cluster_slots_service: ClusterSlotsService,
     replay_stage: Option<ReplayStage>,
@@ -99,6 +99,8 @@ pub struct TvuConfig {
     pub replay_transactions_threads: NonZeroUsize,
     pub shred_sigverify_threads: NonZeroUsize,
     pub retransmit_xdp: Option<XdpConfig>,
+    pub retransmit_disabled: bool,
+    pub duplicate_check_disabled: bool,
 }
 
 impl Default for TvuConfig {
@@ -113,6 +115,8 @@ impl Default for TvuConfig {
             replay_transactions_threads: NonZeroUsize::new(1).expect("1 is non-zero"),
             shred_sigverify_threads: NonZeroUsize::new(1).expect("1 is non-zero"),
             retransmit_xdp: None,
+            retransmit_disabled: false,
+            duplicate_check_disabled: false,
         }
     }
 }
@@ -202,8 +206,12 @@ impl Tvu {
 
         let (verified_sender, verified_receiver) = unbounded();
 
-        let (retransmit_sender, retransmit_receiver) =
-            EvictingSender::new_bounded(CHANNEL_SIZE_RETRANSMIT_INGRESS);
+        let (retransmit_sender, retransmit_receiver) = if !tvu_config.retransmit_disabled {
+            let (sender, receiver) = EvictingSender::new_bounded(CHANNEL_SIZE_RETRANSMIT_INGRESS);
+            (Some(sender), Some(receiver))
+        } else {
+            (None, None)
+        };
 
         let shred_sigverify = solana_turbine::sigverify_shreds::spawn_shred_sigverify(
             cluster_info.clone(),
@@ -215,18 +223,23 @@ impl Tvu {
             tvu_config.shred_sigverify_threads,
         );
 
-        let retransmit_stage = RetransmitStage::new(
-            bank_forks.clone(),
-            leader_schedule_cache.clone(),
-            cluster_info.clone(),
-            Arc::new(retransmit_sockets),
-            turbine_quic_endpoint_sender,
-            retransmit_receiver,
-            max_slots.clone(),
-            Some(rpc_subscriptions.clone()),
-            slot_status_notifier.clone(),
-            tvu_config.retransmit_xdp.clone(),
-        );
+        let retransmit_stage = if !tvu_config.retransmit_disabled {
+            Some(RetransmitStage::new(
+                bank_forks.clone(),
+                leader_schedule_cache.clone(),
+                cluster_info.clone(),
+                Arc::new(retransmit_sockets),
+                turbine_quic_endpoint_sender,
+                retransmit_receiver.expect("retransmit_receiver should exist when retransmit is enabled"),
+                max_slots.clone(),
+                Some(rpc_subscriptions.clone()),
+                slot_status_notifier.clone(),
+                tvu_config.retransmit_xdp.clone(),
+            ))
+        } else {
+            info!("Retransmit stage disabled");
+            None
+        };
 
         let (ancestor_duplicate_slots_sender, ancestor_duplicate_slots_receiver) = unbounded();
         let (duplicate_slots_sender, duplicate_slots_receiver) = unbounded();
@@ -276,6 +289,14 @@ impl Tvu {
                 window_service_channels,
                 leader_schedule_cache.clone(),
                 outstanding_repair_requests,
+                tvu_config.duplicate_check_disabled,
+                // Pass slot_status_notifier only when retransmit is disabled
+                // to avoid duplicate notifications
+                if tvu_config.retransmit_disabled {
+                    slot_status_notifier.clone()
+                } else {
+                    None
+                },
             )
         };
 
@@ -406,7 +427,9 @@ impl Tvu {
     }
 
     pub fn join(self) -> thread::Result<()> {
-        self.retransmit_stage.join()?;
+        if let Some(retransmit_stage) = self.retransmit_stage {
+            retransmit_stage.join()?;
+        }
         self.window_service.join()?;
         self.cluster_slots_service.join()?;
         self.fetch_stage.join()?;
