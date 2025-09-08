@@ -171,6 +171,7 @@ pub struct ClusterInfo {
     contact_save_interval: u64,  // milliseconds, 0 = disabled
     contact_info_path: PathBuf,
     socket_addr_space: SocketAddrSpace,
+    gossip_pull_response_disabled: bool,
 }
 
 impl ClusterInfo {
@@ -199,6 +200,7 @@ impl ClusterInfo {
             contact_info_path: PathBuf::default(),
             contact_save_interval: 0, // disabled
             socket_addr_space,
+            gossip_pull_response_disabled: false,
         };
         me.refresh_my_gossip_contact_info();
         me
@@ -206,6 +208,10 @@ impl ClusterInfo {
 
     pub fn set_contact_debug_interval(&mut self, new: u64) {
         self.contact_debug_interval = new;
+    }
+
+    pub fn set_gossip_pull_response_disabled(&mut self, disabled: bool) {
+        self.gossip_pull_response_disabled = disabled;
     }
 
     pub fn socket_addr_space(&self) -> &SocketAddrSpace {
@@ -1555,6 +1561,10 @@ impl ClusterInfo {
     ) {
         let _st = ScopedTimer::from(&self.stats.handle_batch_pull_requests_time);
         if !requests.is_empty() {
+            // Skip processing pull requests if pull responses are disabled
+            if self.gossip_pull_response_disabled {
+                return;
+            }
             let response = self.handle_pull_requests(thread_pool, recycler, requests, stakes);
             if !response.is_empty() {
                 if let Err(TrySendError::Full(response)) = response_sender.try_send(response.into())
