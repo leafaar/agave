@@ -190,7 +190,7 @@ impl ClusterInfoVoteListener {
     pub fn new(
         exit: Arc<AtomicBool>,
         cluster_info: Arc<ClusterInfo>,
-        verified_packets_sender: BankingPacketSender,
+        verified_packets_sender: Option<BankingPacketSender>,
         vote_tracker: Arc<VoteTracker>,
         bank_forks: Arc<RwLock<BankForks>>,
         subscriptions: Arc<RpcSubscriptions>,
@@ -254,7 +254,7 @@ impl ClusterInfoVoteListener {
         exit: Arc<AtomicBool>,
         cluster_info: &ClusterInfo,
         root_bank_cache: &mut RootBankCache,
-        verified_packets_sender: BankingPacketSender,
+        verified_packets_sender: Option<BankingPacketSender>,
         verified_vote_transactions_sender: VerifiedVoteTransactionsSender,
     ) -> Result<()> {
         let mut cursor = Cursor::default();
@@ -264,7 +264,9 @@ impl ClusterInfoVoteListener {
             if !votes.is_empty() {
                 let (vote_txs, packets) = Self::verify_votes(votes, root_bank_cache);
                 verified_vote_transactions_sender.send(vote_txs)?;
-                verified_packets_sender.send(BankingPacketBatch::new(packets))?;
+                if let Some(sender) = &verified_packets_sender {
+                    sender.send(BankingPacketBatch::new(packets))?;
+                }
             }
             sleep(Duration::from_millis(GOSSIP_SLEEP_MILLIS));
         }

@@ -6,7 +6,7 @@ use {
         accounts_hash_verifier::AccountsHashVerifier,
         admin_rpc_post_init::{AdminRpcRequestMetadataPostInit, KeyUpdaterType, KeyUpdaters},
         banking_trace::{self, BankingTracer, TraceError},
-        cluster_info_vote_listener::VoteTracker,
+        cluster_info_vote_listener::{ClusterInfoVoteListener, VoteTracker},
         completed_data_sets_service::CompletedDataSetsService,
         consensus::{
             reconcile_blockstore_roots_with_external_source,
@@ -561,6 +561,8 @@ pub struct Validator {
     poh_recorder: Arc<RwLock<PohRecorder>>,
     poh_service: PohService,
     tpu: Option<Tpu>,
+    // When TPU is disabled, we still need ClusterInfoVoteListener to process votes from gossip
+    standalone_cluster_info_vote_listener: Option<ClusterInfoVoteListener>,
     tvu: Tvu,
     ip_echo_server: Option<solana_net_utils::IpEchoServer>,
     pub cluster_info: Arc<ClusterInfo>,
@@ -1627,8 +1629,11 @@ impl Validator {
                 cancel_tpu_client_next,
             ))
         };
-        let tpu = if !config.tpu_disabled {
-            Some(Tpu::new_with_client(
+        // Create either TPU or standalone ClusterInfoVoteListener
+        // When TPU is disabled, we still need ClusterInfoVoteListener to process votes from gossip
+        let (tpu, standalone_cluster_info_vote_listener) = if !config.tpu_disabled {
+            // Normal TPU mode
+            let tpu = Some(Tpu::new_with_client(
                 &cluster_info,
                 &poh_recorder,
                 transaction_recorder,
@@ -1678,10 +1683,26 @@ impl Validator {
                 config.enable_block_production_forwarding,
                 config.generator_config.clone(),
                 key_notifiers.clone(),
-            ))
+            ));
+            (tpu, None)
         } else {
-            info!("TPU disabled");
-            None
+            info!("TPU disabled - creating standalone ClusterInfoVoteListener for vote processing");
+            
+            let standalone_listener = Some(ClusterInfoVoteListener::new(
+                exit.clone(),
+                cluster_info.clone(),
+                None, // No banking packet sender needed when TPU is disabled
+                vote_tracker.clone(),
+                bank_forks.clone(),
+                rpc_subscriptions.clone(),
+                verified_vote_sender.clone(),
+                gossip_verified_vote_hash_sender.clone(),
+                replay_vote_receiver,
+                blockstore.clone(),
+                bank_notification_sender.as_ref().map(|s| s.sender.clone()),
+                duplicate_confirmed_slot_sender.clone(),
+            ));
+            (None, standalone_listener)
         };
 
         datapoint_info!(
@@ -1732,6 +1753,7 @@ impl Validator {
             snapshot_packager_service,
             completed_data_sets_service,
             tpu,
+            standalone_cluster_info_vote_listener,
             tvu,
             poh_service,
             poh_recorder,
@@ -1882,6 +1904,9 @@ impl Validator {
         }
         if let Some(tpu) = self.tpu {
             tpu.join().expect("tpu");
+        }
+        if let Some(standalone_cluster_info_vote_listener) = self.standalone_cluster_info_vote_listener {
+            standalone_cluster_info_vote_listener.join().expect("standalone_cluster_info_vote_listener");
         }
         self.tvu.join().expect("tvu");
         if let Some(turbine_quic_endpoint_join_handle) = self.turbine_quic_endpoint_join_handle {
