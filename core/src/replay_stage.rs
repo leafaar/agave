@@ -609,7 +609,7 @@ impl ReplayStage {
             block_commitment_cache.clone(),
             rpc_subscriptions.clone(),
         );
-        let run_replay = move || {
+        let mut run_replay = move || {
             let verify_recyclers = VerifyRecyclers::default();
             let _exit = Finalizer::new(exit.clone());
             let mut identity_keypair = cluster_info.keypair().clone();
@@ -693,6 +693,16 @@ impl ReplayStage {
             let replay_tx_thread_pool = rayon::ThreadPoolBuilder::new()
                 .num_threads(replay_transactions_threads.get())
                 .thread_name(|i| format!("solReplayTx{i:02}"))
+                .start_handler(|thread_index| {
+                    if let Some(cores) = core_affinity::get_core_ids() {
+                        if cores.len() > 1 {
+                            // Start from core 1, skip core 0 (POH)
+                            let core_index = 1 + (thread_index % (cores.len() - 1));
+                            core_affinity::set_for_current(cores[core_index]);
+                            debug!("Pinned replay tx thread {} to core {:?}", thread_index, cores[core_index]);
+                        }
+                    }
+                })
                 .build()
                 .expect("new rayon threadpool");
 
@@ -1187,7 +1197,11 @@ impl ReplayStage {
                 if !did_complete_bank {
                     // only wait for the signal if we did not just process a bank; maybe there are more slots available
 
-                    let timer = Duration::from_millis(100);
+                    let timeout_ms = std::env::var("REPLAY_WAIT_TIMEOUT_MS")
+                        .ok()
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .unwrap_or(100); 
+                    let timer = Duration::from_millis(timeout_ms);
                     let result = ledger_signal_receiver.recv_timeout(timer);
                     match result {
                         Err(RecvTimeoutError::Timeout) => (),
@@ -1223,7 +1237,16 @@ impl ReplayStage {
         };
         let t_replay = Builder::new()
             .name("solReplayStage".to_string())
-            .spawn(run_replay)
+            .spawn(move || {
+                // Pin main replay thread to core 1 (core 0 is reserved for POH)
+                if let Some(cores) = core_affinity::get_core_ids() {
+                    if cores.len() > 1 {
+                        core_affinity::set_for_current(cores[1]);
+                        info!("Pinned main replay thread to core {:?}", cores[1]);
+                    }
+                }
+                run_replay()
+            })
             .unwrap();
 
         Ok(Self {
