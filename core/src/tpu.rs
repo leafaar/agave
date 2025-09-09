@@ -262,7 +262,7 @@ impl Tpu {
         let cluster_info_vote_listener = ClusterInfoVoteListener::new(
             exit.clone(),
             cluster_info.clone(),
-            gossip_vote_sender,
+            Some(gossip_vote_sender),
             vote_tracker,
             bank_forks.clone(),
             subscriptions.clone(),
