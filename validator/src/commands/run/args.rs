@@ -133,6 +133,18 @@ pub fn add_args<'a>(app: App<'a, 'a>, default_args: &'a DefaultArgs) -> App<'a, 
             .help("Disable retransmit stage"),
     )
     .arg(
+        Arg::with_name("disable_shred_sigverify")
+            .long("disable-shred-sigverify")
+            .takes_value(false)
+            .help("Disable shred signature verification"),
+    )
+    .arg(
+        Arg::with_name("disable_gossip_tvu_announcing")
+            .long("disable-gossip-tvu-announcing")
+            .takes_value(false)
+            .help("Disable TVU announcement on gossip network"),
+    )
+    .arg(
         Arg::with_name("disable_duplicate_check")
             .long("disable-duplicate-check")
             .takes_value(false)
