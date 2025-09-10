@@ -709,6 +709,7 @@ pub fn execute(
         tpu_disabled: matches.is_present("disable_tpu"),
         retransmit_disabled: matches.is_present("disable_retransmit"),
         duplicate_check_disabled: matches.is_present("disable_duplicate_check"),
+        disable_shred_sigverify: matches.is_present("disable_shred_sigverify"),
         snapshot_serving_disabled: matches.is_present("disable_snapshot_serving"),
         repair_serving_disabled: matches.is_present("disable_repair_serving"),
         gossip_pull_response_disabled: matches.is_present("disable_gossip_pull_response"),
@@ -1218,6 +1219,10 @@ pub fn execute(
         .collect::<Vec<_>>();
 
     let mut node = Node::new_with_external_ip(&identity_keypair.pubkey(), node_config);
+
+    if matches.is_present("disable_gossip_tvu_announcing") {
+        node.info.remove_tvu();
+    }
 
     if restricted_repair_only_mode {
         if validator_config.wen_restart_proto_path.is_some() {

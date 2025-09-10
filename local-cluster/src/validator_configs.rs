@@ -14,6 +14,7 @@ pub fn safe_clone_config(config: &ValidatorConfig) -> ValidatorConfig {
         tpu_disabled: config.tpu_disabled,
         retransmit_disabled: config.retransmit_disabled,
         duplicate_check_disabled: config.duplicate_check_disabled,
+        disable_shred_sigverify: config.disable_shred_sigverify,
         snapshot_serving_disabled: config.snapshot_serving_disabled,
         repair_serving_disabled: config.repair_serving_disabled,
         gossip_pull_response_disabled: config.gossip_pull_response_disabled,

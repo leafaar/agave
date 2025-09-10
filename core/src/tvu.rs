@@ -101,6 +101,7 @@ pub struct TvuConfig {
     pub retransmit_xdp: Option<XdpConfig>,
     pub retransmit_disabled: bool,
     pub duplicate_check_disabled: bool,
+    pub disable_shred_sigverify: bool,
 }
 
 impl Default for TvuConfig {
@@ -117,6 +118,7 @@ impl Default for TvuConfig {
             retransmit_xdp: None,
             retransmit_disabled: false,
             duplicate_check_disabled: false,
+            disable_shred_sigverify: false,
         }
     }
 }
@@ -221,6 +223,7 @@ impl Tvu {
             retransmit_sender.clone(),
             verified_sender,
             tvu_config.shred_sigverify_threads,
+            tvu_config.disable_shred_sigverify,
         );
 
         let retransmit_stage = if !tvu_config.retransmit_disabled {

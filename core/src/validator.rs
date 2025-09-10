@@ -299,6 +299,7 @@ pub struct ValidatorConfig {
     pub delay_leader_block_for_pending_fork: bool,
     pub use_tpu_client_next: bool,
     pub retransmit_xdp: Option<XdpConfig>,
+    pub disable_shred_sigverify: bool,
 }
 
 impl Default for ValidatorConfig {
@@ -380,6 +381,7 @@ impl Default for ValidatorConfig {
             delay_leader_block_for_pending_fork: false,
             use_tpu_client_next: true,
             retransmit_xdp: None,
+            disable_shred_sigverify: false,
         }
     }
 }
@@ -1569,6 +1571,7 @@ impl Validator {
                 retransmit_xdp: config.retransmit_xdp.clone(),
                 retransmit_disabled: config.retransmit_disabled,
                 duplicate_check_disabled: config.duplicate_check_disabled,
+                disable_shred_sigverify: config.disable_shred_sigverify,
             },
             &max_slots,
             block_metadata_notifier,

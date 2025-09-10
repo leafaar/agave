@@ -68,6 +68,7 @@ pub fn spawn_shred_sigverify(
     retransmit_sender: Option<EvictingSender<Vec<shred::Payload>>>,
     verified_sender: Sender<Vec<(shred::Payload, /*is_repaired:*/ bool)>>,
     num_sigverify_threads: NonZeroUsize,
+    disable_sigverify: bool,
 ) -> JoinHandle<()> {
     let recycler_cache = RecyclerCache::warmed();
     let mut stats = ShredSigVerifyStats::new(Instant::now());
@@ -105,6 +106,7 @@ pub fn spawn_shred_sigverify(
                 &cluster_nodes_cache,
                 &cache,
                 &mut stats,
+                disable_sigverify,
             ) {
                 Ok(()) => (),
                 Err(Error::RecvTimeout) => (),
@@ -135,6 +137,7 @@ fn run_shred_sigverify<const K: usize>(
     cluster_nodes_cache: &ClusterNodesCache<RetransmitStage>,
     cache: &RwLock<LruCache>,
     stats: &mut ShredSigVerifyStats,
+    disable_sigverify: bool,
 ) -> Result<(), Error> {
     const RECV_TIMEOUT: Duration = Duration::from_secs(1);
     let packets = shred_fetch_receiver.recv_timeout(RECV_TIMEOUT)?;
@@ -173,76 +176,84 @@ fn run_shred_sigverify<const K: usize>(
             .map(|mut packet| packet.meta_mut().set_discard(true))
             .count()
     });
-    let (working_bank, root_bank) = {
-        let bank_forks = bank_forks.read().unwrap();
-        (bank_forks.working_bank(), bank_forks.root_bank())
-    };
-    verify_packets(
-        thread_pool,
-        &keypair.pubkey(),
-        &working_bank,
-        leader_schedule_cache,
-        recycler_cache,
-        &mut packets,
-        cache,
-    );
-    stats.num_discards_post += count_discards(&packets);
-    // Verify retransmitter's signature, and resign shreds
-    // Merkle root as the retransmitter node.
-    let resign_start = Instant::now();
-    thread_pool.install(|| {
-        packets
-            .par_iter_mut()
-            .flatten()
-            .filter(|packet| !packet.meta().discard())
-            .for_each(|mut packet| {
-                let repair = packet.meta().repair();
-                let Some(shred) = shred::layout::get_shred_mut(&mut packet) else {
-                    packet.meta_mut().set_discard(true);
-                    return;
-                };
-                // Repair packets do not follow turbine tree and
-                // are verified using the trailing nonce.
-                if !repair
-                    && !verify_retransmitter_signature(
-                        shred,
-                        &root_bank,
-                        &working_bank,
-                        cluster_info,
-                        leader_schedule_cache,
-                        cluster_nodes_cache,
-                        stats,
-                    )
-                {
-                    stats
-                        .num_invalid_retransmitter
-                        .fetch_add(1, Ordering::Relaxed);
-                    if shred::layout::get_slot(shred)
-                        .map(|slot| {
-                            check_feature_activation(
-                                &feature_set::verify_retransmitter_signature::id(),
-                                slot,
-                                &root_bank,
-                            )
-                        })
-                        .unwrap_or_default()
-                    {
+    if !disable_sigverify {
+        let working_bank = {
+            let bank_forks = bank_forks.read().unwrap();
+            bank_forks.working_bank()
+        };
+        verify_packets(
+            thread_pool,
+            &keypair.pubkey(),
+            &working_bank,
+            leader_schedule_cache,
+            recycler_cache,
+            &mut packets,
+            cache,
+        );
+        stats.num_discards_post += count_discards(&packets);
+    }
+    if !disable_sigverify {
+        // Verify retransmitter's signature, and resign shreds
+        // Merkle root as the retransmitter node.
+        let resign_start = Instant::now();
+        let (working_bank, root_bank) = {
+            let bank_forks = bank_forks.read().unwrap();
+            (bank_forks.working_bank(), bank_forks.root_bank())
+        };
+        thread_pool.install(|| {
+            packets
+                .par_iter_mut()
+                .flatten()
+                .filter(|packet| !packet.meta().discard())
+                .for_each(|mut packet| {
+                    let repair = packet.meta().repair();
+                    let Some(shred) = shred::layout::get_shred_mut(&mut packet) else {
                         packet.meta_mut().set_discard(true);
                         return;
+                    };
+                    // Repair packets do not follow turbine tree and
+                    // are verified using the trailing nonce.
+                    if !repair
+                        && !verify_retransmitter_signature(
+                            shred,
+                            &root_bank,
+                            &working_bank,
+                            cluster_info,
+                            leader_schedule_cache,
+                            cluster_nodes_cache,
+                            stats,
+                        )
+                    {
+                        stats
+                            .num_invalid_retransmitter
+                            .fetch_add(1, Ordering::Relaxed);
+                        if shred::layout::get_slot(shred)
+                            .map(|slot| {
+                                check_feature_activation(
+                                    &feature_set::verify_retransmitter_signature::id(),
+                                    slot,
+                                    &root_bank,
+                                )
+                            })
+                            .unwrap_or_default()
+                        {
+                            packet.meta_mut().set_discard(true);
+                            return;
+                        }
                     }
-                }
-                // We can ignore Error::InvalidShredVariant because that
-                // basically means that the shred is of a variant which
-                // cannot be signed by the retransmitter node.
-                if !matches!(
-                    shred::layout::resign_shred(shred, keypair),
-                    Ok(()) | Err(shred::Error::InvalidShredVariant)
-                ) {
-                    packet.meta_mut().set_discard(true);
-                }
-            })
-    });
-    stats.resign_micros += resign_start.elapsed().as_micros() as u64;
+                    // We can ignore Error::InvalidShredVariant because that
+                    // basically means that the shred is of a variant which
+                    // cannot be signed by the retransmitter node.
+                    if !matches!(
+                        shred::layout::resign_shred(shred, keypair),
+                        Ok(()) | Err(shred::Error::InvalidShredVariant)
+                    ) {
+                        packet.meta_mut().set_discard(true);
+                    }
+                })
+        });
+        stats.resign_micros += resign_start.elapsed().as_micros() as u64;
+    }
     // Extract shred payload from packets, and separate out repaired shreds.
     let (shreds, repairs): (Vec<_>, Vec<_>) = packets
         .iter()
