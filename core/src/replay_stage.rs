@@ -609,7 +609,7 @@ impl ReplayStage {
             block_commitment_cache.clone(),
             rpc_subscriptions.clone(),
         );
-        let run_replay = move || {
+        let mut run_replay = move || {
             let verify_recyclers = VerifyRecyclers::default();
             let _exit = Finalizer::new(exit.clone());
             let mut identity_keypair = cluster_info.keypair().clone();
@@ -1227,7 +1227,16 @@ impl ReplayStage {
         };
         let t_replay = Builder::new()
             .name("solReplayStage".to_string())
-            .spawn(run_replay)
+            .spawn(move || {
+                // Pin main replay thread to core 1 (core 0 is reserved for POH)
+                if let Some(cores) = core_affinity::get_core_ids() {
+                    if cores.len() > 1 {
+                        core_affinity::set_for_current(cores[1]);
+                        info!("Pinned main replay thread to core {:?}", cores[1]);
+                    }
+                }
+                run_replay()
+            })
             .unwrap();
 
         Ok(Self {
