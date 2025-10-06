@@ -613,11 +613,6 @@ where
         keys.into_iter().map(|index| C::key(&index)).collect()
     }
 
-    #[allow(dead_code,
-        reason = "This was being used when reading from disk, since now
-            we are reading from in-memory, I will leave it here just in case
-        ")
-    ]
     pub(crate) fn multi_get_bytes<'a, K>(
         &'a self,
         keys: impl IntoIterator<Item = &'a K> + 'a,

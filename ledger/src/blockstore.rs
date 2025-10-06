@@ -107,93 +107,6 @@ pub const MAX_COMPLETED_SLOTS_IN_CHANNEL: usize = 100_000;
 // (32K shreds per slot * 4 TX per shred * 2.5 slots per sec)
 pub const MAX_DATA_SHREDS_PER_SLOT: usize = 32_768;
 
-struct InMemoryShredStorage {
-    data_shreds: Arc<RwLock<BTreeMap<(Slot, u64), Vec<u8>>>>,
-    code_shreds: Arc<RwLock<BTreeMap<(Slot, u64), Vec<u8>>>>,
-    current_root: Arc<AtomicU64>,
-}
-
-impl InMemoryShredStorage {
-    fn new() -> Self {
-        Self {
-            data_shreds: Arc::new(RwLock::new(BTreeMap::new())),
-            code_shreds: Arc::new(RwLock::new(BTreeMap::new())),
-            current_root: Arc::new(AtomicU64::new(0)),
-        }
-    }
-
-    fn prune_before_root(&self, root_slot: Slot) {
-        let old_root = self.current_root.swap(root_slot, Ordering::Relaxed);
-        if root_slot <= old_root {
-            return; 
-        }
-        
-        // Keep a buffer of slots before root for recovery operations
-        // Recovery may need shreds from recent non-rooted slots
-        let prune_slot = root_slot.saturating_sub(100);
-        
-        let mut data_shreds = self.data_shreds.write().unwrap();
-        let mut code_shreds = self.code_shreds.write().unwrap();
-        
-        // Split at the prune slot, keeping everything >= prune_slot
-        *data_shreds = data_shreds.split_off(&(prune_slot, 0));
-        *code_shreds = code_shreds.split_off(&(prune_slot, 0));
-    }
-    
-    fn insert_data_shred(&self, slot: Slot, index: u64, data: Vec<u8>) {
-        let mut shreds = self.data_shreds.write().unwrap();
-        let root = self.current_root.load(Ordering::Relaxed);
-        if slot < root {
-            return;
-        }
-        shreds.insert((slot, index), data);
-    }
-    
-    fn insert_code_shred(&self, slot: Slot, index: u64, data: Vec<u8>) {
-        let mut shreds = self.code_shreds.write().unwrap();
-        let root = self.current_root.load(Ordering::Relaxed);
-        if slot < root {
-            return;
-        }
-        shreds.insert((slot, index), data);
-    }
-    
-    fn get_data_shred(&self, slot: Slot, index: u64) -> Option<Vec<u8>> {
-        let shreds = self.data_shreds.read().unwrap();
-        shreds.get(&(slot, index)).cloned()
-    }
-    
-    fn get_code_shred(&self, slot: Slot, index: u64) -> Option<Vec<u8>> {
-        let shreds = self.code_shreds.read().unwrap();
-        shreds.get(&(slot, index)).cloned()
-    }
-    
-    fn iter_data_shreds(&self, slot: Slot, start_index: u64) -> Vec<((Slot, u64), Vec<u8>)> {
-        let shreds = self.data_shreds.read().unwrap();
-        shreds
-            .range((slot, start_index)..)
-            .take_while(|((s, _), _)| *s == slot)
-            .map(|((s, i), data)| ((*s, *i), data.clone()))
-            .collect()
-    }
-    
-    fn iter_code_shreds(&self, slot: Slot, start_index: u64) -> Vec<((Slot, u64), Vec<u8>)> {
-        let shreds = self.code_shreds.read().unwrap();
-        shreds
-            .range((slot, start_index)..)
-            .take_while(|((s, _), _)| *s == slot)
-            .map(|((s, i), data)| ((*s, *i), data.clone()))
-            .collect()
-    }
-    
-    fn get_data_shreds_range(&self, slot: Slot, start: u64, end: u64) -> Vec<Option<Vec<u8>>> {
-        let shreds = self.data_shreds.read().unwrap();
-        (start..end)
-            .map(|index| shreds.get(&(slot, index)).cloned())
-            .collect()
-    }
-}
-
 pub type CompletedSlotsSender = Sender<Vec<Slot>>;
 pub type CompletedSlotsReceiver = Receiver<Vec<Slot>>;
 
@@ -357,9 +270,6 @@ pub struct Blockstore {
     transaction_memos_cf: LedgerColumn<cf::TransactionMemos>,
     transaction_status_cf: LedgerColumn<cf::TransactionStatus>,
     transaction_status_index_cf: LedgerColumn<cf::TransactionStatusIndex>,
-
-    // In-memory shred storage
-    in_memory_shreds: InMemoryShredStorage,
 
     highest_primary_index_slot: RwLock<Option<Slot>>,
     max_root: AtomicU64,
@@ -541,7 +451,6 @@ impl Blockstore {
             transaction_memos_cf,
             transaction_status_cf,
             transaction_status_index_cf,
-            in_memory_shreds: InMemoryShredStorage::new(),
             highest_primary_index_slot: RwLock::<Option<Slot>>::default(),
             new_shreds_signals: Mutex::default(),
             completed_slots_senders: Mutex::default(),
@@ -788,14 +697,11 @@ impl Blockstore {
         slot: Slot,
         index: u64,
     ) -> Result<impl Iterator<Item = ((u64, u64), Box<[u8]>)> + '_> {
-        // let slot_iterator = self.data_shred_cf.iter(IteratorMode::From(
-        //     (slot, index),
-        //     IteratorDirection::Forward,
-        // ))?;
-        // Ok(slot_iterator.take_while(move |((shred_slot, _), _)| *shred_slot == slot))
-        
-        let shreds = self.in_memory_shreds.iter_data_shreds(slot, index);
-        Ok(shreds.into_iter().map(|((slot, index), data)| ((slot, index), data.into_boxed_slice())))
+        let slot_iterator = self.data_shred_cf.iter(IteratorMode::From(
+            (slot, index),
+            IteratorDirection::Forward,
+        ))?;
+        Ok(slot_iterator.take_while(move |((shred_slot, _), _)| *shred_slot == slot))
     }
 
     #[allow(clippy::type_complexity)]
@@ -804,14 +710,11 @@ impl Blockstore {
         slot: Slot,
         index: u64,
     ) -> Result<impl Iterator<Item = ((u64, u64), Box<[u8]>)> + '_> {
-        // let slot_iterator = self.code_shred_cf.iter(IteratorMode::From(
-        //     (slot, index),
-        //     IteratorDirection::Forward,
-        // ))?;
-        // Ok(slot_iterator.take_while(move |((shred_slot, _), _)| *shred_slot == slot))
-        
-        let shreds = self.in_memory_shreds.iter_code_shreds(slot, index);
-        Ok(shreds.into_iter().map(|((slot, index), data)| ((slot, index), data.into_boxed_slice())))
+        let slot_iterator = self.code_shred_cf.iter(IteratorMode::From(
+            (slot, index),
+            IteratorDirection::Forward,
+        ))?;
+        Ok(slot_iterator.take_while(move |((shred_slot, _), _)| *shred_slot == slot))
     }
 
     fn prepare_rooted_slot_iterator(
@@ -884,16 +787,16 @@ impl Blockstore {
             if !index.data().contains(i) {
                 return None;
             }
-            match self.in_memory_shreds.get_data_shred(slot, i) {
-                Some(data) => Shred::new_from_serialized_shred(data).ok(),
+            match self.data_shred_cf.get_bytes((slot, i)).unwrap() {
                 None => {
                     error!(
                         "Unable to read the data shred with slot {slot}, index {i} for shred \
                          recovery. The shred is marked present in the slot's data shred index, \
-                         but the shred could not be found in memory."
+                         but the shred could not be found in the data shred column."
                     );
                     None
                 }
+                Some(data) => Shred::new_from_serialized_shred(data).ok(),
             }
         })
     }
@@ -913,17 +816,16 @@ impl Blockstore {
             if !index.coding().contains(i) {
                 return None;
             }
-            // Only check in-memory storage
-            match self.in_memory_shreds.get_code_shred(slot, i) {
-                Some(code) => Shred::new_from_serialized_shred(code).ok(),
+            match self.code_shred_cf.get_bytes((slot, i)).unwrap() {
                 None => {
                     error!(
                         "Unable to read the coding shred with slot {slot}, index {i} for shred \
                          recovery. The shred is marked present in the slot's coding shred index, \
-                         but the shred could not be found in memory."
+                         but the shred could not be found in the coding shred column."
                     );
                     None
                 }
+                Some(code) => Shred::new_from_serialized_shred(code).ok(),
             }
         })
     }
@@ -1888,7 +1790,7 @@ impl Blockstore {
         &self,
         index_meta: &mut Index,
         shred: &Shred,
-        _write_batch: &mut WriteBatch,
+        write_batch: &mut WriteBatch,
     ) -> Result<()> {
         let slot = shred.slot();
         let shred_index = u64::from(shred.index());
@@ -1900,7 +1802,8 @@ impl Blockstore {
 
         // Commit step: commit all changes to the mutable structures at once, or none at all.
         // We don't want only a subset of these changes going through.
-        self.in_memory_shreds.insert_code_shred(slot, shred_index, shred.payload().to_vec());
+        self.code_shred_cf
+            .put_bytes_in_batch(write_batch, (slot, shred_index), shred.payload())?;
         index_meta.coding_mut().insert(shred_index);
 
         Ok(())
@@ -2315,7 +2218,7 @@ impl Blockstore {
         slot_meta: &mut SlotMeta,
         data_index: &'a mut ShredIndex,
         shred: &Shred,
-        _write_batch: &mut WriteBatch,
+        write_batch: &mut WriteBatch,
         shred_source: ShredSource,
     ) -> Result<impl Iterator<Item = CompletedDataSetInfo> + 'a> {
         let slot = shred.slot();
@@ -2351,7 +2254,11 @@ impl Blockstore {
 
         // Commit step: commit all changes to the mutable structures at once, or none at all.
         // We don't want only a subset of these changes going through.
-        self.in_memory_shreds.insert_data_shred(slot, index, shred.bytes_to_store().to_vec());
+        self.data_shred_cf.put_bytes_in_batch(
+            write_batch,
+            (slot, index),
+            shred.bytes_to_store(),
+        )?;
         data_index.insert(index);
         let newly_completed_data_sets = update_slot_meta(
             last_in_slot,
@@ -2377,18 +2284,13 @@ impl Blockstore {
     }
 
     pub fn get_data_shred(&self, slot: Slot, index: u64) -> Result<Option<Vec<u8>>> {
-        // Only check in-memory storage
-        match self.in_memory_shreds.get_data_shred(slot, index) {
-            Some(shred) => {
-                let shred = ShredData::resize_stored_shred(shred).map_err(|err| {
-                    let err = format!("Invalid stored shred: {err}");
-                    let err = Box::new(bincode::ErrorKind::Custom(err));
-                    BlockstoreError::InvalidShredData(err)
-                })?;
-                Ok(Some(shred))
-            }
-            None => Ok(None),
-        }
+        let shred = self.data_shred_cf.get_bytes((slot, index))?;
+        let shred = shred.map(ShredData::resize_stored_shred).transpose();
+        shred.map_err(|err| {
+            let err = format!("Invalid stored shred: {err}");
+            let err = Box::new(bincode::ErrorKind::Custom(err));
+            BlockstoreError::InvalidShredData(err)
+        })
     }
 
     pub fn get_data_shreds_for_slot(&self, slot: Slot, start_index: u64) -> Result<Vec<Shred>> {
@@ -2445,8 +2347,7 @@ impl Blockstore {
     }
 
     pub fn get_coding_shred(&self, slot: Slot, index: u64) -> Result<Option<Vec<u8>>> {
-        // Only check in-memory storage
-        Ok(self.in_memory_shreds.get_code_shred(slot, index))
+        self.code_shred_cf.get_bytes((slot, index))
     }
 
     pub fn get_coding_shreds_for_slot(
@@ -3824,28 +3725,26 @@ impl Blockstore {
             return Ok(vec![]);
         };
         let indices = u64::from(start)..u64::from(end);
-        
-        let shred_data = self.in_memory_shreds.get_data_shreds_range(slot, u64::from(start), u64::from(end));
-        
-        let mut shreds = shred_data
-            .into_iter()
-            .zip(indices)
-            .map(|(shred, index)| {
-                shred.ok_or_else(|| {
-                    maybe_panic(index);
-                    BlockstoreError::MissingShred(slot, index)
-                })
-            });
+        let keys = indices.clone().map(|index| (slot, index));
+        let keys = self.data_shred_cf.multi_get_keys(keys);
+        let mut shreds =
+            self.data_shred_cf
+                .multi_get_bytes(&keys)
+                .zip(indices)
+                .map(|(shred, index)| {
+                    shred?.ok_or_else(|| {
+                        maybe_panic(index);
+                        BlockstoreError::MissingShred(slot, index)
+                    })
+                });
         completed_ranges
             .into_iter()
             .map(|Range { start, end }| end - start)
             .map(|num_shreds| {
-                let shred_batch: Vec<Vec<u8>> = shreds
+                shreds
                     .by_ref()
                     .take(num_shreds as usize)
-                    .collect::<Result<Vec<_>>>()?;
-                    
-                Shredder::deshred(&shred_batch)
+                    .process_results(|shreds| Shredder::deshred(shreds))?
                     .map_err(|e| {
                         BlockstoreError::InvalidShredData(Box::new(bincode::ErrorKind::Custom(
                             format!("could not reconstruct entries buffer from shreds: {e:?}"),
@@ -3937,73 +3836,36 @@ impl Blockstore {
                 is_retransmitter_signed: false,
             });
         };
-        // Try memory first for new shreds
-        let shred_data = self.in_memory_shreds.get_data_shreds_range(slot, start_index, last_shred_index + 1);
-        
-        // Check if we got all shreds from memory, otherwise fall back to disk
-        let all_in_memory = shred_data.iter().all(|s| s.is_some());
-        
-        let deduped_shred_checks: Vec<(Hash, bool)> = if all_in_memory {
-            shred_data
-                .into_iter()
-                .enumerate()
-                .map(|(offset, shred_bytes)| {
-                    let shred_bytes = shred_bytes.ok_or_else(|| {
+        let keys = self
+            .data_shred_cf
+            .multi_get_keys((start_index..=last_shred_index).map(|index| (slot, index)));
+
+        let deduped_shred_checks: Vec<(Hash, bool)> = self
+            .data_shred_cf
+            .multi_get_bytes(&keys)
+            .enumerate()
+            .map(|(offset, shred_bytes)| {
+                let shred_bytes = shred_bytes.ok().flatten().ok_or_else(|| {
+                    let shred_index = start_index + u64::try_from(offset).unwrap();
+                    warn!("Missing shred for {slot} index {shred_index}");
+                    BlockstoreError::MissingShred(slot, shred_index)
+                })?;
+                let is_retransmitter_signed =
+                    shred::layout::is_retransmitter_signed_variant(&shred_bytes).map_err(|_| {
                         let shred_index = start_index + u64::try_from(offset).unwrap();
-                        warn!("Missing shred for {slot} index {shred_index}");
-                        BlockstoreError::MissingShred(slot, shred_index)
+                        warn!("Found legacy shred for {slot}, index {shred_index}");
+                        BlockstoreError::LegacyShred(slot, shred_index)
                     })?;
-                    let is_retransmitter_signed =
-                        shred::layout::is_retransmitter_signed_variant(&shred_bytes).map_err(|_| {
-                            let shred_index = start_index + u64::try_from(offset).unwrap();
-                            warn!("Found legacy shred for {slot}, index {shred_index}");
-                            BlockstoreError::LegacyShred(slot, shred_index)
-                        })?;
-                    let merkle_root =
-                        shred::layout::get_merkle_root(&shred_bytes).ok_or_else(|| {
-                            let shred_index = start_index + u64::try_from(offset).unwrap();
-                            warn!("Unable to read merkle root for {slot}, index {shred_index}");
-                            BlockstoreError::MissingMerkleRoot(slot, shred_index)
-                        })?;
-                    Ok::<_, BlockstoreError>((merkle_root, is_retransmitter_signed))
-                })
-                .dedup_by(|a, b| match (a, b) {
-                    (Ok((hash_a, _)), Ok((hash_b, _))) => hash_a == hash_b,
-                    _ => false,
-                })
-                .collect::<Result<Vec<_>>>()?
-        } else {
-            // Fall back to disk for old data
-            let keys = self
-                .data_shred_cf
-                .multi_get_keys((start_index..=last_shred_index).map(|index| (slot, index)));
-            
-            self.data_shred_cf
-                .multi_get_bytes(&keys)
-                .enumerate()
-                .map(|(offset, shred_bytes)| {
-                    let shred_bytes = shred_bytes?.ok_or_else(|| {
+                let merkle_root =
+                    shred::layout::get_merkle_root(&shred_bytes).ok_or_else(|| {
                         let shred_index = start_index + u64::try_from(offset).unwrap();
-                        warn!("Missing shred for {slot} index {shred_index}");
-                        BlockstoreError::MissingShred(slot, shred_index)
+                        warn!("Unable to read merkle root for {slot}, index {shred_index}");
+                        BlockstoreError::MissingMerkleRoot(slot, shred_index)
                     })?;
-                    let is_retransmitter_signed =
-                        shred::layout::is_retransmitter_signed_variant(&shred_bytes).map_err(|_| {
-                            let shred_index = start_index + u64::try_from(offset).unwrap();
-                            warn!("Found legacy shred for {slot}, index {shred_index}");
-                            BlockstoreError::LegacyShred(slot, shred_index)
-                        })?;
-                    let merkle_root =
-                        shred::layout::get_merkle_root(&shred_bytes).ok_or_else(|| {
-                            let shred_index = start_index + u64::try_from(offset).unwrap();
-                            warn!("Unable to read merkle root for {slot}, index {shred_index}");
-                            BlockstoreError::MissingMerkleRoot(slot, shred_index)
-                        })?;
-                    Ok((merkle_root, is_retransmitter_signed))
-                })
-                .dedup_by(|res1, res2| res1.as_ref().ok() == res2.as_ref().ok())
-                .collect::<Result<Vec<(Hash, bool)>>>()?
-        };
+                Ok((merkle_root, is_retransmitter_signed))
+            })
+            .dedup_by(|res1, res2| res1.as_ref().ok() == res2.as_ref().ok())
+            .collect::<Result<Vec<(Hash, bool)>>>()?;
 
         // After the dedup there should be exactly one Hash left and one true value
         let &[(block_id, is_retransmitter_signed)] = deduped_shred_checks.as_slice() else {
@@ -4141,12 +4003,6 @@ impl Blockstore {
         self.write_batch(write_batch)?;
         self.max_root
             .fetch_max(max_new_rooted_slot, Ordering::Relaxed);
-        
-        // Prune in-memory shreds that are before the new root
-        if max_new_rooted_slot > 0 {
-            self.in_memory_shreds.prune_before_root(max_new_rooted_slot);
-        }
-        
         Ok(())
     }
 
