@@ -2951,6 +2951,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "firedancer-reed-solomon"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "five8"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9063,6 +9071,7 @@ dependencies = [
  "crossbeam-channel",
  "dashmap",
  "eager",
+ "firedancer-reed-solomon",
  "fs_extra",
  "futures 0.3.31",
  "itertools 0.12.1",

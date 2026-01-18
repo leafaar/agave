@@ -2,6 +2,7 @@ use {
     crate::shred::{
         self, Error, ProcessShredsStats, Shred, ShredData, ShredFlags, DATA_SHREDS_PER_FEC_BLOCK,
     },
+    fd_reedsol::ReedSolomon as FiredancerReedSolomon,
     lazy_lru::LruCache,
     rayon::ThreadPool,
     reed_solomon_erasure::{galois_8::ReedSolomon, Error::TooFewDataShards},
@@ -33,6 +34,14 @@ pub struct ReedSolomonCache(
     LruCacheOnce<
         (usize, usize), // number of {data,parity} shards
         Result<Arc<ReedSolomon>, reed_solomon_erasure::Error>,
+    >,
+);
+
+/// Cache for Firedancer Reed-Solomon decoder (used for recovery/decoding only)
+pub struct FiredancerReedSolomonCache(
+    LruCacheOnce<
+        (usize, usize), // number of {data,parity} shards
+        Result<Arc<FiredancerReedSolomon>, fd_reedsol::Error>,
     >,
 );
 
@@ -242,6 +251,39 @@ impl ReedSolomonCache {
 }
 
 impl Default for ReedSolomonCache {
+    fn default() -> Self {
+        Self(RwLock::new(LruCache::new(Self::CAPACITY)))
+    }
+}
+
+impl FiredancerReedSolomonCache {
+    const CAPACITY: usize = 4 * DATA_SHREDS_PER_FEC_BLOCK;
+
+    pub(crate) fn get(
+        &self,
+        data_shards: usize,
+        parity_shards: usize,
+    ) -> Result<Arc<FiredancerReedSolomon>, fd_reedsol::Error> {
+        let key = (data_shards, parity_shards);
+        // Read from the cache with a shared lock.
+        let entry = self.0.read().unwrap().get(&key).cloned();
+        // Fall back to exclusive lock if there is a cache miss.
+        let entry: Arc<OnceLock<Result<_, _>>> = entry.unwrap_or_else(|| {
+            let mut cache = self.0.write().unwrap();
+            cache.get(&key).cloned().unwrap_or_else(|| {
+                let entry = Arc::<OnceLock<Result<_, _>>>::default();
+                cache.put(key, Arc::clone(&entry));
+                entry
+            })
+        });
+        // Initialize if needed by only a single thread outside locks.
+        entry
+            .get_or_init(|| FiredancerReedSolomon::new(data_shards, parity_shards).map(Arc::new))
+            .clone()
+    }
+}
+
+impl Default for FiredancerReedSolomonCache {
     fn default() -> Self {
         Self(RwLock::new(LruCache::new(Self::CAPACITY)))
     }

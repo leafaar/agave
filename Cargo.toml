@@ -262,6 +262,7 @@ env_logger = "0.11.8"
 etcd-client = "0.11.1"
 fast-math = "0.1"
 fd-lock = "3.0.13"
+firedancer-reed-solomon = { path = "../firedancer-reed-solomon" }
 five8_const = "0.1.4"
 flate2 = "1.0.31"
 fnv = "1.0.7"

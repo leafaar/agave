@@ -5,8 +5,9 @@ use {
     solana_hash::Hash,
     solana_keypair::Keypair,
     solana_ledger::shred::{
-        self, max_entries_per_n_shred, recover, verify_test_data_shred, ProcessShredsStats,
-        ReedSolomonCache, Shred, ShredData, Shredder, DATA_SHREDS_PER_FEC_BLOCK,
+        self, max_entries_per_n_shred, recover, verify_test_data_shred,
+        FiredancerReedSolomonCache, ProcessShredsStats, ReedSolomonCache, Shred, ShredData,
+        Shredder, DATA_SHREDS_PER_FEC_BLOCK,
     },
     solana_signer::Signer,
     solana_system_transaction as system_transaction,
@@ -48,6 +49,7 @@ fn test_multi_fec_block_coding(is_last_in_slot: bool) {
         .collect();
 
     let reed_solomon_cache = ReedSolomonCache::default();
+    let firedancer_reed_solomon_cache = FiredancerReedSolomonCache::default();
     let serialized_entries = bincode::serialize(&entries).unwrap();
 
     let (data_shreds, coding_shreds) = shredder.entries_to_merkle_shreds_for_tests(
@@ -85,7 +87,7 @@ fn test_multi_fec_block_coding(is_last_in_slot: bool) {
             .filter_map(|(i, b)| if i % 2 != 0 { Some(b.clone()) } else { None })
             .collect();
 
-        let recovered_data = recover(shred_info.clone(), &reed_solomon_cache)
+        let recovered_data = recover(shred_info.clone(), &firedancer_reed_solomon_cache)
             .unwrap()
             .map(|result| result.unwrap())
             .filter(|shred| shred.is_data());
@@ -125,7 +127,7 @@ fn test_multi_fec_block_different_size_coding() {
         setup_different_sized_fec_blocks(slot, parent_slot, keypair.clone());
 
     let total_num_data_shreds: usize = fec_data.values().map(|x| x.len()).sum();
-    let reed_solomon_cache = ReedSolomonCache::default();
+    let firedancer_reed_solomon_cache = FiredancerReedSolomonCache::default();
     // Test recovery
     for (fec_data_shreds, fec_coding_shreds) in fec_data.values().zip(fec_coding.values()) {
         let first_data_index = fec_data_shreds.first().unwrap().index() as usize;
@@ -135,7 +137,7 @@ fn test_multi_fec_block_different_size_coding() {
             .chain(fec_coding_shreds.iter().step_by(2))
             .cloned()
             .collect();
-        let recovered_data: Vec<Shred> = shred::recover(all_shreds, &reed_solomon_cache)
+        let recovered_data: Vec<Shred> = shred::recover(all_shreds, &firedancer_reed_solomon_cache)
             .unwrap()
             .filter_map(|s| {
                 let s = s.unwrap();

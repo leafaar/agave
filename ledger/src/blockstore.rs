@@ -18,8 +18,8 @@ use {
         leader_schedule_cache::LeaderScheduleCache,
         next_slots_iterator::NextSlotsIterator,
         shred::{
-            self, ErasureSetId, ProcessShredsStats, ReedSolomonCache, Shred, ShredData, ShredId,
-            ShredType, Shredder, DATA_SHREDS_PER_FEC_BLOCK,
+            self, ErasureSetId, FiredancerReedSolomonCache, ProcessShredsStats, ReedSolomonCache,
+            Shred, ShredData, ShredId, ShredType, Shredder, DATA_SHREDS_PER_FEC_BLOCK,
         },
         slot_stats::{ShredSource, SlotsStats},
         transaction_address_lookup_table_scanner::scan_transaction,
@@ -830,7 +830,7 @@ impl Blockstore {
         index: &'a Index,
         erasure_meta: &'a ErasureMeta,
         prev_inserted_shreds: &'a HashMap<ShredId, Cow<'_, Shred>>,
-        reed_solomon_cache: &'a ReedSolomonCache,
+        reed_solomon_cache: &'a FiredancerReedSolomonCache,
     ) -> std::result::Result<impl Iterator<Item = Shred> + 'a, shred::Error> {
         // Find shreds for this erasure set and try recovery
         let data = self.get_recovery_data_shreds(index, erasure_meta, prev_inserted_shreds);
@@ -945,7 +945,7 @@ impl Blockstore {
         erasure_metas: &'a BTreeMap<ErasureSetId, WorkingEntry<ErasureMeta>>,
         index_working_set: &'a HashMap<u64, IndexMetaWorkingSetEntry>,
         prev_inserted_shreds: &'a HashMap<ShredId, Cow<'_, Shred>>,
-        reed_solomon_cache: &'a ReedSolomonCache,
+        reed_solomon_cache: &'a FiredancerReedSolomonCache,
     ) -> impl Iterator<Item = Shred> + 'a {
         // Recovery rules:
         // 1. Only try recovery around indexes for which new data or coding shreds are received
@@ -982,7 +982,7 @@ impl Blockstore {
     fn handle_shred_recovery(
         &self,
         leader_schedule: Option<&LeaderScheduleCache>,
-        reed_solomon_cache: &ReedSolomonCache,
+        reed_solomon_cache: &FiredancerReedSolomonCache,
         shred_insertion_tracker: &mut ShredInsertionTracker,
         retransmit_sender: &EvictingSender<Vec<shred::Payload>>,
         is_trusted: bool,
@@ -1231,7 +1231,7 @@ impl Blockstore {
         // from another leader, we need to try erasure recovery and retransmit
         // recovered shreds.
         should_recover_shreds: Option<(
-            &ReedSolomonCache,
+            &FiredancerReedSolomonCache,
             &EvictingSender<Vec<shred::Payload>>, // retransmit_sender
         )>,
         metrics: &mut BlockstoreInsertionMetrics,
@@ -1315,7 +1315,7 @@ impl Blockstore {
         is_trusted: bool,
         retransmit_sender: &EvictingSender<Vec<shred::Payload>>,
         handle_duplicate: &F,
-        reed_solomon_cache: &ReedSolomonCache,
+        reed_solomon_cache: &FiredancerReedSolomonCache,
         metrics: &mut BlockstoreInsertionMetrics,
     ) -> Result<Vec<CompletedDataSetInfo>>
     where
@@ -9980,7 +9980,7 @@ pub mod tests {
                 coding_shreds,
                 Some(&leader_schedule_cache),
                 false, // is_trusted
-                Some((&ReedSolomonCache::default(), &dummy_retransmit_sender)),
+                Some((&FiredancerReedSolomonCache::default(), &dummy_retransmit_sender)),
                 &mut BlockstoreInsertionMetrics::default(),
             )
             .unwrap();

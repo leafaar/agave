@@ -60,7 +60,7 @@ pub use {
         shred_data::ShredData,
         stats::{ProcessShredsStats, ShredFetchStats},
     },
-    crate::shredder::{ReedSolomonCache, Shredder},
+    crate::shredder::{FiredancerReedSolomonCache, ReedSolomonCache, Shredder},
 };
 use {
     self::{shred_code::ShredCode, traits::Shred as _},
@@ -168,6 +168,8 @@ pub enum Error {
     BincodeError(#[from] bincode::Error),
     #[error(transparent)]
     ErasureError(#[from] reed_solomon_erasure::Error),
+    #[error(transparent)]
+    FiredancerErasureError(#[from] fd_reedsol::Error),
     #[error("Invalid data size: {size}, payload: {payload}")]
     InvalidDataSize { size: u16, payload: usize },
     #[error("Invalid deshred set")]
@@ -740,7 +742,7 @@ impl TryFrom<u8> for ShredVariant {
 
 pub fn recover(
     shreds: impl IntoIterator<Item = Shred>,
-    reed_solomon_cache: &ReedSolomonCache,
+    reed_solomon_cache: &FiredancerReedSolomonCache,
 ) -> Result<impl Iterator<Item = Result<Shred, Error>>, Error> {
     let shreds = shreds
         .into_iter()

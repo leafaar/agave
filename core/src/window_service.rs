@@ -18,7 +18,7 @@ use {
     solana_ledger::{
         blockstore::{Blockstore, BlockstoreInsertionMetrics, PossibleDuplicateShred},
         leader_schedule_cache::LeaderScheduleCache,
-        shred::{self, ReedSolomonCache, Shred},
+        shred::{self, FiredancerReedSolomonCache, Shred},
     },
     solana_measure::measure::Measure,
     solana_metrics::inc_new_counter_error,
@@ -188,7 +188,7 @@ fn run_insert<F>(
     ws_metrics: &mut WindowServiceMetrics,
     completed_data_sets_sender: Option<&CompletedDataSetsSender>,
     retransmit_sender: &EvictingSender<Vec<shred::Payload>>,
-    reed_solomon_cache: &ReedSolomonCache,
+    reed_solomon_cache: &FiredancerReedSolomonCache,
     accept_repairs_only: bool,
 ) -> Result<()>
 where
@@ -379,7 +379,7 @@ impl WindowService {
         let handle_error = || {
             inc_new_counter_error!("solana-window-insert-error", 1, 1);
         };
-        let reed_solomon_cache = ReedSolomonCache::default();
+        let reed_solomon_cache = FiredancerReedSolomonCache::default();
         Builder::new()
             .name("solWinInsert".to_string())
             .spawn(move || {
@@ -466,7 +466,7 @@ mod test {
             blockstore::{make_many_slot_entries, Blockstore},
             genesis_utils::create_genesis_config,
             get_tmp_ledger_path_auto_delete,
-            shred::{ProcessShredsStats, Shredder},
+            shred::{FiredancerReedSolomonCache, ProcessShredsStats, ReedSolomonCache, Shredder},
         },
         solana_runtime::bank::Bank,
         solana_signer::Signer,
@@ -614,7 +614,7 @@ mod test {
                     false, // is_trusted
                     &dummy_retransmit_sender,
                     &handle_duplicate,
-                    &ReedSolomonCache::default(),
+                    &FiredancerReedSolomonCache::default(),
                     &mut BlockstoreInsertionMetrics::default(),
                 )
                 .unwrap();

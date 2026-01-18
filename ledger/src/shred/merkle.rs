@@ -17,7 +17,7 @@ use {
             SHREDS_PER_FEC_BLOCK, SIZE_OF_CODING_SHRED_HEADERS, SIZE_OF_DATA_SHRED_HEADERS,
             SIZE_OF_SIGNATURE,
         },
-        shredder::ReedSolomonCache,
+        shredder::{FiredancerReedSolomonCache, ReedSolomonCache},
     },
     assert_matches::debug_assert_matches,
     itertools::{Either, Itertools},
@@ -670,7 +670,7 @@ fn get_merkle_node(shred: &[u8], offsets: Range<usize>) -> Result<Hash, Error> {
 
 pub(super) fn recover(
     mut shreds: Vec<Shred>,
-    reed_solomon_cache: &ReedSolomonCache,
+    reed_solomon_cache: &FiredancerReedSolomonCache,
 ) -> Result<impl Iterator<Item = Result<Shred, Error>>, Error> {
     // Sort shreds by their erasure shard index.
     // In particular this places all data shreds before coding shreds.
@@ -808,7 +808,7 @@ pub(super) fn recover(
         .collect::<Result<Vec<_>, Error>>()?;
     reed_solomon_cache
         .get(num_data_shreds, num_coding_shreds)?
-        .reconstruct(&mut shards)?;
+        .reconstruct_with_mask(&mut shards)?;
     // Drop the mut guards to allow further mutation below.
     drop(shards);
     // Verify and sanitize recovered shreds, re-compute the Merkle tree and set
@@ -1319,7 +1319,6 @@ mod test {
         itertools::Itertools,
         rand::{seq::SliceRandom, CryptoRng, Rng},
         rayon::ThreadPoolBuilder,
-        reed_solomon_erasure::Error::TooFewShardsPresent,
         solana_keypair::Keypair,
         solana_packet::PACKET_DATA_SIZE,
         solana_signer::Signer,
@@ -1444,6 +1443,7 @@ mod test {
     fn test_recover_merkle_shreds(num_shreds: usize, chained: bool, resigned: bool) {
         let mut rng = rand::thread_rng();
         let reed_solomon_cache = ReedSolomonCache::default();
+        let firedancer_reed_solomon_cache = FiredancerReedSolomonCache::default();
         for num_data_shreds in 1..num_shreds {
             let num_coding_shreds = num_shreds - num_data_shreds;
             run_recover_merkle_shreds(
@@ -1453,6 +1453,7 @@ mod test {
                 num_data_shreds,
                 num_coding_shreds,
                 &reed_solomon_cache,
+                &firedancer_reed_solomon_cache,
             );
         }
     }
@@ -1464,6 +1465,7 @@ mod test {
         num_data_shreds: usize,
         num_coding_shreds: usize,
         reed_solomon_cache: &ReedSolomonCache,
+        firedancer_reed_solomon_cache: &FiredancerReedSolomonCache,
     ) {
         let keypair = Keypair::new();
         let num_shreds = num_data_shreds + num_coding_shreds;
@@ -1562,13 +1564,13 @@ mod test {
             assert!(shred.verify(&keypair.pubkey()));
             assert_matches!(shred.sanitize(), Ok(()));
         }
-        verify_erasure_recovery(rng, &shreds, reed_solomon_cache);
+        verify_erasure_recovery(rng, &shreds, firedancer_reed_solomon_cache);
     }
 
     fn verify_erasure_recovery<R: Rng>(
         rng: &mut R,
         shreds: &[Shred],
-        reed_solomon_cache: &ReedSolomonCache,
+        firedancer_reed_solomon_cache: &FiredancerReedSolomonCache,
     ) {
         assert_eq!(shreds.iter().map(Shred::signature).dedup().count(), 1);
         assert_eq!(shreds.iter().map(Shred::fec_set_index).dedup().count(), 1);
@@ -1588,20 +1590,22 @@ mod test {
                     ShredVariant::MerkleData { .. }
                 )
             }) {
+                // No coding shreds available - expect TooFewShards error from Firedancer
                 assert_matches!(
-                    recover(shreds, reed_solomon_cache).err(),
-                    Some(Error::ErasureError(TooFewParityShards))
+                    recover(shreds, firedancer_reed_solomon_cache).err(),
+                    Some(Error::FiredancerErasureError(fd_reedsol::Error::TooFewShards { .. }))
                 );
                 continue;
             }
             if shreds.len() < num_data_shreds {
+                // Not enough shreds to recover - expect TooFewShards error from Firedancer
                 assert_matches!(
-                    recover(shreds, reed_solomon_cache).err(),
-                    Some(Error::ErasureError(TooFewShardsPresent))
+                    recover(shreds, firedancer_reed_solomon_cache).err(),
+                    Some(Error::FiredancerErasureError(fd_reedsol::Error::TooFewShards { .. }))
                 );
                 continue;
             }
-            let recovered_shreds: Vec<_> = recover(shreds, reed_solomon_cache)
+            let recovered_shreds: Vec<_> = recover(shreds, firedancer_reed_solomon_cache)
                 .unwrap()
                 .map(Result::unwrap)
                 .collect();
@@ -1629,6 +1633,7 @@ mod test {
         let mut rng = rand::thread_rng();
         let data_size = data_size.saturating_sub(16);
         let reed_solomon_cache = ReedSolomonCache::default();
+        let firedancer_reed_solomon_cache = FiredancerReedSolomonCache::default();
         for data_size in data_size..data_size + 32 {
             run_make_shreds_from_data(
                 &mut rng,
@@ -1636,6 +1641,7 @@ mod test {
                 chained,
                 is_last_in_slot,
                 &reed_solomon_cache,
+                &firedancer_reed_solomon_cache,
             );
         }
     }
@@ -1647,6 +1653,7 @@ mod test {
     fn test_make_shreds_from_data_rand(chained: bool, is_last_in_slot: bool) {
         let mut rng = rand::thread_rng();
         let reed_solomon_cache = ReedSolomonCache::default();
+        let firedancer_reed_solomon_cache = FiredancerReedSolomonCache::default();
         for _ in 0..32 {
             let data_size = rng.gen_range(0..31200 * 7);
             run_make_shreds_from_data(
@@ -1655,6 +1662,7 @@ mod test {
                 chained,
                 is_last_in_slot,
                 &reed_solomon_cache,
+                &firedancer_reed_solomon_cache,
             );
         }
     }
@@ -1667,6 +1675,7 @@ mod test {
     fn test_make_shreds_from_data_paranoid(chained: bool, is_last_in_slot: bool) {
         let mut rng = rand::thread_rng();
         let reed_solomon_cache = ReedSolomonCache::default();
+        let firedancer_reed_solomon_cache = FiredancerReedSolomonCache::default();
         for data_size in 0..=PACKET_DATA_SIZE * 4 * 64 {
             run_make_shreds_from_data(
                 &mut rng,
@@ -1674,6 +1683,7 @@ mod test {
                 chained,
                 is_last_in_slot,
                 &reed_solomon_cache,
+                &firedancer_reed_solomon_cache,
             );
         }
     }
@@ -1684,6 +1694,7 @@ mod test {
         chained: bool,
         is_last_in_slot: bool,
         reed_solomon_cache: &ReedSolomonCache,
+        firedancer_reed_solomon_cache: &FiredancerReedSolomonCache,
     ) {
         let thread_pool = ThreadPoolBuilder::new().num_threads(2).build().unwrap();
         let keypair = Keypair::new();
@@ -1904,7 +1915,7 @@ mod test {
             .group_by(|shred| shred.common_header().fec_set_index)
             .into_iter()
             .flat_map(|(_, shreds)| {
-                recover(shreds.collect(), reed_solomon_cache)
+                recover(shreds.collect(), firedancer_reed_solomon_cache)
                     .unwrap()
                     .map(Result::unwrap)
             })
@@ -1923,7 +1934,7 @@ mod test {
             .into_group_map_by(Shred::fec_set_index)
             .values()
         {
-            verify_erasure_recovery(rng, shreds, reed_solomon_cache);
+            verify_erasure_recovery(rng, shreds, firedancer_reed_solomon_cache);
         }
     }
 }
